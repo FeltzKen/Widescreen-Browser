@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear WideScreen Browser Session</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a202c;
+            color: #e2e8f0;
+        }
+        button {
+            background: #4299e1;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #3182ce;
+        }
+        .danger {
+            background: #e53e3e;
+        }
+        .danger:hover {
+            background: #c53030;
+        }
+        .success {
+            color: #48bb78;
+            margin-top: 20px;
+        }
+        pre {
+            background: #2d3748;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>WideScreen Browser Session Manager</h1>
+    <p>Use this tool to clear corrupted browser session data.</p>
+    
+    <button onclick="showSession()">📋 Show Current Session</button>
+    <button onclick="clearSession()" class="danger">🗑️ Clear Session Data</button>
+    <button onclick="clearAll()" class="danger">⚠️ Clear All Data</button>
+    
+    <div id="output"></div>
+
+    <script>
+        function showSession() {
+            const session = localStorage.getItem('browserSession');
+            const output = document.getElementById('output');
+            
+            if (session) {
+                try {
+                    const data = JSON.parse(session);
+                    output.innerHTML = '<h3>Current Session:</h3><pre>' + 
+                        JSON.stringify(data, null, 2) + '</pre>';
+                } catch (e) {
+                    output.innerHTML = '<p class="danger">Error parsing session: ' + e.message + '</p>';
+                }
+            } else {
+                output.innerHTML = '<p>No session data found.</p>';
+            }
+        }
+
+        function clearSession() {
+            localStorage.removeItem('browserSession');
+            document.getElementById('output').innerHTML = 
+                '<p class="success">✓ Browser session cleared! Restart the browser.</p>';
+        }
+
+        function clearAll() {
+            if (confirm('This will clear ALL browser data including bookmarks, history, and settings. Are you sure?')) {
+                localStorage.clear();
+                document.getElementById('output').innerHTML = 
+                    '<p class="success">✓ All data cleared! Restart the browser.</p>';
+            }
+        }
+    </script>
+</body>
+</html>

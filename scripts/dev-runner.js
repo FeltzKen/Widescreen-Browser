@@ -23,6 +23,9 @@ const startVite = async () => {
   await server.listen()
   console.log('Vite dev server started')
 
+  // Wait a bit for the initial build to complete
+  await new Promise(resolve => setTimeout(resolve, 2000))
+
   const electronProcess = spawn(electron, ['.'], {
     stdio: 'inherit',
     env: { ...process.env, NODE_ENV: 'development' }

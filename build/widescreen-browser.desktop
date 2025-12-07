@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=WideScreen Browser
+Comment=A widescreen-focused web browser with advanced panel management
+GenericName=Web Browser
+Exec=widescreen-browser %U
+Icon=widescreen-browser
+Type=Application
+StartupNotify=true
+StartupWMClass=WideScreen Browser
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=widescreen-browser

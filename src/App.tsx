@@ -148,6 +148,14 @@ function App() {
 
   // Recently closed tabs
   const [recentlyClosed, setRecentlyClosed] = useState<Tab[]>([])
+  
+  // Recently closed groups
+  const [recentlyClosedGroups, setRecentlyClosedGroups] = useState<Array<{
+    group: Group
+    tabs: Tab[]
+    splitWidths: number[]
+    closedAt: number
+  }>>([])
 
   // Bookmarks state
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => {
@@ -156,7 +164,13 @@ function App() {
   })
   const [bookmarkFolders, setBookmarkFolders] = useState<BookmarkFolder[]>(() => {
     const saved = localStorage.getItem('bookmarkFolders')
-    return saved ? JSON.parse(saved) : [{ id: 'root', name: 'Bookmarks', parentId: null }]
+    const folders = saved ? JSON.parse(saved) : []
+    // Ensure root folder always exists
+    const hasRoot = folders.some((f: BookmarkFolder) => f.id === 'root')
+    if (!hasRoot) {
+      folders.unshift({ id: 'root', name: 'Bookmarks', parentId: null })
+    }
+    return folders
   })
   const [showBookmarks, setShowBookmarks] = useState(false)
 
@@ -168,8 +182,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false)
 
   // Downloads state
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [downloads, setDownloads] = useState<DownloadItem[]>([])
+  const [downloads] = useState<DownloadItem[]>([])
   const [showDownloads, setShowDownloads] = useState(false)
 
   // Sessions state
@@ -192,6 +205,17 @@ function App() {
 
   // Settings state
   const [showSettings, setShowSettings] = useState(false)
+  const [showKeyboardHelp, setShowKeyboardHelp] = useState(false)
+  const [showRecentlyClosed, setShowRecentlyClosed] = useState(false)
+  
+  // Page context menu state
+  const [pageContextMenu, setPageContextMenu] = useState<{
+    x: number
+    y: number
+    linkUrl?: string
+    imageUrl?: string
+  } | null>(null)
+  
   const [settings, setSettings] = useState(() => {
     const saved = localStorage.getItem('appSettings')
     return saved ? JSON.parse(saved) : {
@@ -199,7 +223,28 @@ function App() {
       homepage: 'about:blank',
       defaultZoom: 100,
       enableNotifications: true,
-      privateMode: false
+      privateMode: false,
+      customTheme: 'default',
+      uiScale: 100,
+      adBlockEnabled: true,
+      autoSleepTabs: true,
+      sleepTabsAfter: 30 // minutes
+    }
+  })
+
+  // Performance monitoring
+  const [showPerformance, setShowPerformance] = useState(false)
+  const [memoryUsage, setMemoryUsage] = useState<{ used: number; total: number }>({ used: 0, total: 0 })
+  const [sleepingTabs, setSleepingTabs] = useState<Set<string>>(new Set())
+
+  // Custom theme
+  const [customTheme, setCustomTheme] = useState(() => {
+    const saved = localStorage.getItem('customTheme')
+    return saved ? JSON.parse(saved) : {
+      primaryColor: '#4a9eff',
+      backgroundColor: '#1a1a1a',
+      textColor: '#ffffff',
+      accentColor: '#ff6b6b'
     }
   })
 
@@ -266,10 +311,37 @@ function App() {
         e.preventDefault()
         setShowSettings(true)
       }
+      // Ctrl/Cmd + /: Show keyboard shortcuts
+      else if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault()
+        setShowKeyboardHelp(!showKeyboardHelp)
+      }
+      // Ctrl/Cmd + Shift + H: Show recently closed tabs
+      else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'H') {
+        e.preventDefault()
+        setShowRecentlyClosed(!showRecentlyClosed)
+      }
       // Ctrl/Cmd + R: Reload
       else if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
         e.preventDefault()
         reload()
+      }
+      // Alt + Left: Go Back
+      else if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault()
+        goBack()
+      }
+      // Alt + Right: Go Forward
+      else if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault()
+        goForward()
+      }
+      // Ctrl/Cmd + P: Pin/Unpin current tab
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+        e.preventDefault()
+        if (activeTab) {
+          togglePinTab(activeTab.id)
+        }
       }
       // Ctrl/Cmd + L: Focus URL bar
       else if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
@@ -326,7 +398,18 @@ function App() {
 
   // Persist bookmark folders
   useEffect(() => {
-    localStorage.setItem('bookmarkFolders', JSON.stringify(bookmarkFolders))
+    // Ensure root folder always exists before saving
+    const hasRoot = bookmarkFolders.some(f => f.id === 'root')
+    const foldersToSave = hasRoot 
+      ? bookmarkFolders 
+      : [{ id: 'root', name: 'Bookmarks', parentId: null }, ...bookmarkFolders]
+    
+    localStorage.setItem('bookmarkFolders', JSON.stringify(foldersToSave))
+    
+    // Update state if root was missing
+    if (!hasRoot) {
+      setBookmarkFolders(foldersToSave)
+    }
   }, [bookmarkFolders])
 
   // Persist history
@@ -346,7 +429,7 @@ function App() {
 
   // Hide BrowserViews when any modal is open (z-index issue)
   useEffect(() => {
-    const anyModalOpen = showBookmarks || showHistory || showDownloads || showSessions || showSettings
+    const anyModalOpen = showBookmarks || showHistory || showDownloads || showSessions || showSettings || showKeyboardHelp || showRecentlyClosed || showPerformance
     
     if (anyModalOpen) {
       // Hide all browser views
@@ -364,7 +447,7 @@ function App() {
       // Restore normal view layout
       updateAllViews()
     }
-  }, [showBookmarks, showHistory, showDownloads, showSessions, showSettings])
+  }, [showBookmarks, showHistory, showDownloads, showSessions, showSettings, showKeyboardHelp, showRecentlyClosed, showPerformance, tabs, groups, activeTabId])
 
   // Initialize browser views for all tabs (including restored ones)
   useEffect(() => {
@@ -406,9 +489,39 @@ function App() {
       }
     })
 
+    // Listen for favicon updates
+    window.electronAPI.onViewFaviconUpdated((viewId: string, favicon: string) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, favicon } : t
+        )
+      )
+    })
+
+    // Listen for loading state changes
+    window.electronAPI.onViewLoadingChanged((viewId: string, isLoading: boolean) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, isLoading } : t
+        )
+      )
+    })
+
+    // Listen for audio state changes
+    window.electronAPI.onViewAudioChanged((viewId: string, isPlaying: boolean) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, isAudioPlaying: isPlaying } : t
+        )
+      )
+    })
+
     return () => {
       window.electronAPI?.offViewTitleUpdated()
       window.electronAPI?.offViewNavigated()
+      window.electronAPI?.offViewFaviconUpdated()
+      window.electronAPI?.offViewLoadingChanged()
+      window.electronAPI?.offViewAudioChanged()
       // Clean up all views
       tabs.forEach(tab => {
         window.electronAPI?.removeBrowserView(tab.viewId)
@@ -472,15 +585,108 @@ function App() {
     saveSession()
   }, [tabs, groups, activeTabId, groupSplitWidths])
 
+  // Performance monitoring
+  useEffect(() => {
+    const updateMemory = () => {
+      const perf = performance as any
+      if (perf.memory) {
+        setMemoryUsage({
+          used: Math.round(perf.memory.usedJSHeapSize / 1024 / 1024),
+          total: Math.round(perf.memory.jsHeapSizeLimit / 1024 / 1024)
+        })
+      }
+    }
+
+    const interval = setInterval(updateMemory, 5000)
+    updateMemory()
+    return () => clearInterval(interval)
+  }, [])
+
+  // Auto-sleep inactive tabs
+  useEffect(() => {
+    if (!settings.autoSleepTabs) return
+
+    const checkInactiveTabs = () => {
+      tabs.forEach(tab => {
+        if (tab.id !== activeTabId && !sleepingTabs.has(tab.id)) {
+          // Check if tab has been inactive for threshold time
+          // For now, we'll just sleep non-visible tabs after threshold
+          // In production, you'd track last access time
+          const shouldSleep = tab.groupId !== activeTab?.groupId
+          if (shouldSleep) {
+            setSleepingTabs(prev => new Set(prev).add(tab.id))
+            // Hide the view to save resources
+            if (window.electronAPI) {
+              window.electronAPI.updateViewBounds(tab.viewId, {
+                x: 0, y: 0, width: 0, height: 0
+              })
+            }
+          }
+        }
+      })
+    }
+
+    const interval = setInterval(checkInactiveTabs, 30000) // Check every 30s
+    return () => clearInterval(interval)
+  }, [tabs, activeTabId, settings.autoSleepTabs, settings.sleepTabsAfter, sleepingTabs])
+
+  // Save custom theme
+  useEffect(() => {
+    localStorage.setItem('customTheme', JSON.stringify(customTheme))
+    
+    // Define theme palettes
+    const themePalettes = {
+      default: {
+        primaryColor: '#4a9eff',
+        backgroundColor: '#1a1a1a',
+        textColor: '#ffffff',
+        accentColor: '#ff6b6b'
+      },
+      blue: {
+        primaryColor: '#3b82f6',
+        backgroundColor: '#0f172a',
+        textColor: '#e0e7ff',
+        accentColor: '#60a5fa'
+      },
+      green: {
+        primaryColor: '#10b981',
+        backgroundColor: '#064e3b',
+        textColor: '#d1fae5',
+        accentColor: '#34d399'
+      },
+      purple: {
+        primaryColor: '#a855f7',
+        backgroundColor: '#2e1065',
+        textColor: '#f3e8ff',
+        accentColor: '#c084fc'
+      }
+    }
+    
+    // Apply theme colors
+    let colors = customTheme
+    const themeName = settings.customTheme as 'default' | 'blue' | 'green' | 'purple' | 'custom'
+    if (themeName !== 'custom' && themePalettes[themeName]) {
+      colors = themePalettes[themeName]
+    }
+    
+    document.documentElement.style.setProperty('--primary-color', colors.primaryColor)
+    document.documentElement.style.setProperty('--background-color', colors.backgroundColor)
+    document.documentElement.style.setProperty('--text-color', colors.textColor)
+    document.documentElement.style.setProperty('--accent-color', colors.accentColor)
+  }, [customTheme, settings.customTheme])
+
+  // Apply UI scale
+  useEffect(() => {
+    document.documentElement.style.setProperty('--ui-scale', `${settings.uiScale / 100}`)
+  }, [settings.uiScale])
+
   const updateAllViews = () => {
     if (!window.electronAPI) return
 
     const sidebarWidth = sidebarOpen ? 180 : 0
     const windowWidth = window.innerWidth - sidebarWidth
     const windowHeight = window.innerHeight
-    const toolbarHeight = 120 // Increased for tab bar
-    const panelHeaderHeight = 40 // Height of per-panel address bars
-
+    
     const activeTab = tabs.find(t => t.id === activeTabId)
     if (!activeTab) return
 
@@ -490,10 +696,35 @@ function App() {
       : null
     
     const isInSplitView = activeGroup && activeGroup.tabIds.length >= 2
+    
+    // Hide nav-bar when group is shown, show it for single tabs
+    const navBarHeight = 32 // Height of the nav-bar with controls and URL input (content ~32px + 12px bottom padding)
+    const tabBarHeight = 64 // Height of just the tab bar (content ~49px + 10px top + 5px bottom padding)
+    const toolbarHeight = isInSplitView ? tabBarHeight : (tabBarHeight + navBarHeight)
+    const dragHandleHeight = 20 // Height of drag handle
+    const panelHeaderHeight = 44 // Height of per-panel address bars
 
     tabs.forEach(tab => {
       const isActive = tab.id === activeTabId
       const isSplashScreen = tab.url === 'about:blank'
+      const isSleeping = sleepingTabs.has(tab.id)
+      
+      // Wake up sleeping tabs when they become active
+      if (isActive && isSleeping) {
+        setSleepingTabs(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(tab.id)
+          return newSet
+        })
+      }
+      
+      // Don't render sleeping tabs
+      if (isSleeping && !isActive) {
+        window.electronAPI.updateViewBounds(tab.viewId, {
+          x: 0, y: 0, width: 0, height: 0
+        })
+        return
+      }
       
       // If active tab is in a group, show all tabs in that group split (regardless of collapsed state)
       if (activeGroup && tab.groupId === activeGroup.id) {
@@ -524,8 +755,8 @@ function App() {
         }
 
         // Add panel header height if in split view (resize handles are at top, no gap below headers)
-        const yPos = isInSplitView ? toolbarHeight + panelHeaderHeight : toolbarHeight
-        const viewHeight = isInSplitView ? windowHeight - toolbarHeight - panelHeaderHeight : windowHeight - toolbarHeight
+        const yPos = isInSplitView ? toolbarHeight + dragHandleHeight + panelHeaderHeight : toolbarHeight
+        const viewHeight = isInSplitView ? windowHeight - toolbarHeight - dragHandleHeight - panelHeaderHeight : windowHeight - toolbarHeight
 
         // Add borders by insetting the view bounds (4px on sides between panels)
         const borderWidth = 4
@@ -578,8 +809,14 @@ function App() {
     
     // Check if it's a URL or search query
     if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.includes('.')) {
-      // It's a search query - use DuckDuckGo
-      finalUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(finalUrl)
+      // It's a search query - use configured search engine
+      const searchEngines = {
+        google: 'https://www.google.com/search?q=',
+        duckduckgo: 'https://duckduckgo.com/?q=',
+        bing: 'https://www.bing.com/search?q='
+      }
+      const searchEngine = settings.defaultSearchEngine as keyof typeof searchEngines
+      finalUrl = (searchEngines[searchEngine] || searchEngines.duckduckgo) + encodeURIComponent(finalUrl)
     } else if (!/^https?:\/\//i.test(finalUrl)) {
       // It's a domain without protocol
       finalUrl = 'https://' + finalUrl
@@ -703,16 +940,27 @@ function App() {
   const goForward = () => activeTab && window.electronAPI?.viewGoForward(activeTab.viewId)
   const reload = () => activeTab && window.electronAPI?.viewReload(activeTab.viewId)
 
+  // Pin tab function
+  const togglePinTab = (tabId: string) => {
+    setTabs(prevTabs => 
+      prevTabs.map(t => 
+        t.id === tabId 
+          ? { ...t, pinned: !t.pinned }
+          : t
+      )
+    )
+  }
+
   // Bookmark functions
   const addBookmark = (url: string, title: string, folderId: string = 'root') => {
     const newBookmark: Bookmark = {
-      id: `bookmark-${Date.now()}`,
+      id: `bookmark-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       title,
       url,
       folderId,
       dateAdded: Date.now()
     }
-    setBookmarks([...bookmarks, newBookmark])
+    setBookmarks(prevBookmarks => [...prevBookmarks, newBookmark])
   }
 
   const removeBookmark = (bookmarkId: string) => {
@@ -721,7 +969,7 @@ function App() {
 
   const createBookmarkFolder = (name: string, parentId: string = 'root') => {
     const newFolder: BookmarkFolder = {
-      id: `folder-${Date.now()}`,
+      id: `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       name,
       parentId
     }
@@ -729,6 +977,18 @@ function App() {
     return newFolder.id
   }
 
+  const removeBookmarkFolder = (folderId: string) => {
+    // Prevent deletion of system folders
+    if (folderId === 'root') {
+      return
+    }
+    // Remove all bookmarks in this folder
+    setBookmarks(bookmarks.filter(b => b.folderId !== folderId))
+    // Remove the folder
+    setBookmarkFolders(bookmarkFolders.filter(f => f.id !== folderId))
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const moveBookmark = (bookmarkId: string, targetFolderId: string) => {
     setBookmarks(bookmarks.map(b => 
@@ -762,6 +1022,7 @@ function App() {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const searchHistory = (query: string) => {
     return history.filter(h => 
       h.title.toLowerCase().includes(query.toLowerCase()) || 
@@ -771,15 +1032,25 @@ function App() {
 
   // Session functions
   const saveCurrentSession = (name: string) => {
+    // Filter out about:blank tabs
+    const validTabs = tabs.filter(t => t.url && t.url !== 'about:blank')
+    
     const session: SavedSession = {
-      id: `session-${Date.now()}`,
+      id: `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       name,
-      tabs: tabs.map(t => ({ url: t.url, title: t.title, groupId: t.groupId })),
-      groups: groups.map(g => ({ name: g.name, tabIds: g.tabIds })),
+      tabs: validTabs.map(t => ({ 
+        url: t.url, 
+        title: t.title, 
+        groupId: t.groupId 
+      })),
+      groups: groups.map(g => ({ 
+        name: g.name, 
+        tabIds: g.tabIds.filter(tabId => validTabs.find(t => t.id === tabId))
+      })),
       groupSplitWidths,
       dateCreated: Date.now()
     }
-    setSavedSessions([...savedSessions, session])
+    setSavedSessions(prevSessions => [...prevSessions, session])
   }
 
   const loadSession = async (sessionId: string) => {
@@ -793,35 +1064,82 @@ function App() {
       }
     }
 
+    // Create mapping of old group IDs to new group IDs
+    const groupIdMap = new Map<string | null, string | null>()
+    groupIdMap.set(null, null) // null stays null (ungrouped tabs)
+    
+    // Create new groups first to get their IDs
+    const newGroups: Group[] = []
+    session.groups.forEach((savedGroup, index) => {
+      const newGroupId = `group-${Date.now()}-${index}-${Math.random().toString(36).substr(2, 9)}`
+      
+      // Find the old group ID from the first tab that belonged to this group
+      const firstTabInGroup = session.tabs.find(t => 
+        savedGroup.tabIds.includes(session.tabs.indexOf(t).toString()) || 
+        t.groupId === savedGroup.tabIds[0]
+      )
+      
+      if (firstTabInGroup?.groupId) {
+        groupIdMap.set(firstTabInGroup.groupId, newGroupId)
+      }
+      
+      newGroups.push({
+        id: newGroupId,
+        name: savedGroup.name,
+        collapsed: false,
+        tabIds: [] // Will be populated as we create tabs
+      })
+    })
+
     // Recreate tabs from session
     const newTabs: Tab[] = []
-    for (const tabData of session.tabs) {
-      const newTabId = `tab-${Date.now()}-${Math.random()}`
-      const newViewId = `view-${Date.now()}-${Math.random()}`
-      newTabs.push({
+    for (let i = 0; i < session.tabs.length; i++) {
+      const tabData = session.tabs[i]
+      const newTabId = `tab-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`
+      const newViewId = `view-${newTabId}`
+      
+      // Map old group ID to new group ID
+      const newGroupId = groupIdMap.get(tabData.groupId) || null
+      
+      const newTab: Tab = {
         id: newTabId,
         url: tabData.url,
         title: tabData.title,
         viewId: newViewId,
-        groupId: tabData.groupId
-      })
+        groupId: newGroupId
+      }
+      
+      newTabs.push(newTab)
+      
+      // Add tab ID to the corresponding group
+      if (newGroupId) {
+        const group = newGroups.find(g => g.id === newGroupId)
+        if (group) {
+          group.tabIds.push(newTabId)
+        }
+      }
+      
       if (window.electronAPI) {
         await window.electronAPI.createBrowserView(newViewId, tabData.url)
       }
+      
+      // Small delay between tab creations
+      await new Promise(resolve => setTimeout(resolve, 50))
     }
 
     setTabs(newTabs)
+    setGroups(newGroups)
     setActiveTabId(newTabs[0]?.id || '')
     
-    // Recreate groups
-    const newGroups = session.groups.map((g, idx) => ({
-      id: `group-${Date.now()}-${idx}`,
-      name: g.name,
-      collapsed: false,
-      tabIds: newTabs.filter(t => t.groupId === g.tabIds[newTabs.findIndex(nt => nt.groupId === g.tabIds[0])]).map(t => t.id)
-    }))
-    setGroups(newGroups)
-    setGroupSplitWidths(session.groupSplitWidths)
+    // Update group split widths with new group IDs
+    const newGroupSplitWidths: { [groupId: string]: number[] } = {}
+    Object.entries(session.groupSplitWidths).forEach(([oldGroupId, widths]) => {
+      const newGroupId = groupIdMap.get(oldGroupId)
+      if (newGroupId) {
+        newGroupSplitWidths[newGroupId] = widths
+      }
+    })
+    setGroupSplitWidths(newGroupSplitWidths)
   }
 
   const deleteSession = (sessionId: string) => {
@@ -853,13 +1171,6 @@ function App() {
     }
   }
 
-  // Pin/unpin tab
-  const togglePinTab = (tabId: string) => {
-    setTabs(tabs.map(t => 
-      t.id === tabId ? { ...t, pinned: !t.pinned } : t
-    ))
-  }
-
   // Context menu handlers
   const handleTabContextMenu = (e: React.MouseEvent, tabId: string) => {
     e.preventDefault()
@@ -870,6 +1181,23 @@ function App() {
   const closeContextMenu = () => {
     setContextMenuTabId(null)
     setContextMenuPosition(null)
+    setPageContextMenu(null)
+  }
+
+  // Page context menu handler
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const handlePageContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const target = e.target as HTMLElement
+    const link = target.closest('a')
+    const img = target.closest('img')
+    
+    setPageContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      linkUrl: link?.href,
+      imageUrl: img?.src
+    })
   }
 
   const duplicateTab = async (tabId: string) => {
@@ -1108,6 +1436,12 @@ function App() {
 
     // Store for undo
     setUndoGroupClose({ group, tabs: groupTabs, splitWidths })
+    
+    // Add to recently closed groups (keep last 10)
+    setRecentlyClosedGroups(prev => [
+      { group, tabs: groupTabs, splitWidths, closedAt: Date.now() },
+      ...prev
+    ].slice(0, 10))
 
     // Remove browser views
     groupTabs.forEach(tab => {
@@ -1632,6 +1966,44 @@ function App() {
     }
   }, [resizingGroupId, resizingHandleIndex, resizeStartX, groups, groupSplitWidths])
 
+  // Wake sleeping tab
+  const wakeTab = (tabId: string) => {
+    setSleepingTabs(prev => {
+      const newSet = new Set(prev)
+      newSet.delete(tabId)
+      return newSet
+    })
+    updateAllViews()
+  }
+
+  // Ad blocker (basic implementation - would need actual filter lists in production)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const isAdUrl = (url: string): boolean => {
+    if (!settings.adBlockEnabled) return false
+    const adPatterns = [
+      'doubleclick.net',
+      'googlesyndication.com',
+      'google-analytics.com',
+      'googleadservices.com',
+      'amazon-adsystem.com',
+      'facebook.com/tr',
+      'ads.',
+      '/ads/',
+      '/ad/',
+      'tracker',
+      'analytics'
+    ]
+    return adPatterns.some(pattern => url.includes(pattern))
+  }
+
+  // Screenshot function (would require Electron IPC in production)
+  const takeScreenshot = async () => {
+    if (!activeTab) return
+    // This would need to be implemented in Electron main process
+    // For now, just show a message
+    alert('Screenshot functionality requires additional Electron IPC setup')
+  }
+
   return (
     <div className="app">
       {/* Sidebar */}
@@ -1699,6 +2071,10 @@ function App() {
               <span className="sidebar-item-icon">📜</span>
               <span className="sidebar-item-label">History</span>
             </div>
+            <div className="sidebar-item" onClick={() => setShowRecentlyClosed(!showRecentlyClosed)}>
+              <span className="sidebar-item-icon">🔄</span>
+              <span className="sidebar-item-label">Recently Closed ({recentlyClosed.length})</span>
+            </div>
             <div className="sidebar-item" onClick={() => setShowDownloads(!showDownloads)}>
               <span className="sidebar-item-icon">⬇️</span>
               <span className="sidebar-item-label">Downloads ({downloads.length})</span>
@@ -1708,9 +2084,17 @@ function App() {
           {/* Browser Settings Section */}
           <div className="sidebar-section">
             <div className="sidebar-section-title">Browser</div>
+            <div className="sidebar-item" onClick={() => setShowPerformance(!showPerformance)}>
+              <span className="sidebar-item-icon">📈</span>
+              <span className="sidebar-item-label">Performance</span>
+            </div>
             <div className="sidebar-item" onClick={() => setShowSettings(true)}>
               <span className="sidebar-item-icon">⚙️</span>
               <span className="sidebar-item-label">Settings</span>
+            </div>
+            <div className="sidebar-item" onClick={() => setShowKeyboardHelp(true)}>
+              <span className="sidebar-item-icon">⌨️</span>
+              <span className="sidebar-item-label">Shortcuts</span>
             </div>
             <div className="sidebar-item" onClick={async () => {
               if (window.electronAPI?.clearCache) {
@@ -1801,6 +2185,14 @@ function App() {
               onDrop={() => handleDrop(tab.id)}
             >
               {tab.pinned && <span className="pin-indicator">📌</span>}
+              {tab.favicon ? (
+                <img src={tab.favicon} alt="" className="tab-favicon" />
+              ) : (
+                <span className="tab-icon">🌐</span>
+              )}
+              {tab.isLoading && <span className="loading-indicator">⟳</span>}
+              {tab.isAudioPlaying && <span className="audio-indicator">🔊</span>}
+              {sleepingTabs.has(tab.id) && <span className="sleeping-indicator">💤</span>}
               <span className="tab-title">{tab.title.split(/[\s.,;:!?\-|/()\[\]{}"']/)[0]}</span>
               <button 
                 className="close-tab" 
@@ -1927,24 +2319,36 @@ function App() {
           <button className="new-tab-button" onClick={addNewTab}>+</button>
         </div>
 
-        <div className="nav-bar">
-          <div className="nav-controls">
-            <button onClick={goBack}>←</button>
-            <button onClick={goForward}>→</button>
-            <button onClick={reload}>⟳</button>
-          </div>
+        {/* Hide nav-bar when a group is selected, show for single tabs */}
+        {(() => {
+          const activeTab = tabs.find(t => t.id === activeTabId)
+          const activeGroup = activeTab?.groupId ? groups.find(g => g.id === activeTab.groupId) : null
+          const isGroupView = activeGroup && activeGroup.tabIds.length >= 2
+          
+          if (isGroupView) return null
+          
+          return (
+            <div className="nav-bar">
+              <div className="nav-controls">
+                <button onClick={goBack}>←</button>
+                <button onClick={goForward}>→</button>
+                <button onClick={reload}>⟳</button>
+              </div>
 
-          <input
-            type="text"
-            className="url-input"
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && navigate()}
-            placeholder="Enter URL or search..."
-          />
+              <input
+                type="text"
+                className="url-input"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && navigate()}
+                placeholder="Enter URL or search..."
+              />
 
-          <button onClick={() => navigate()}>Go</button>
-        </div>
+              <button onClick={() => navigate()}>Go</button>
+              <button onClick={takeScreenshot} title="Take Screenshot">📷</button>
+            </div>
+          )
+        })()}
       </div>
 
       {/* Panel containers for split views - each contains drag handle, address bar, and content */}
@@ -1983,10 +2387,10 @@ function App() {
               style={{
                 left: `${Math.round(cumulativeX + offsetX + sidebarWidth)}px`,
                 width: `${panelWidth}px`,
-                top: '100px',
+                top: '64px',
                 bottom: 0,
                 position: 'fixed',
-                zIndex: draggingPanelIndex === index ? 1002 : 50
+                zIndex: draggingPanelIndex === index ? 1002 : 1001
               }}
             >
               {/* Drag Handle */}
@@ -2064,9 +2468,10 @@ function App() {
               className="resize-handle"
               style={{
                 left: `${Math.round(cumulativeX + totalOffset + sidebarWidth)}px`,
-                top: '100px', // right below toolbar, same area as drag handles
+                top: '64px',
                 height: '20px',
-                width: '32px'
+                width: '32px',
+                zIndex: 1002
               }}
               onMouseDown={(e) => handleResizeStart(activeGroup.id, i, e)}
             />
@@ -2333,6 +2738,90 @@ function App() {
         </>
       )}
 
+      {/* Page Context Menu */}
+      {pageContextMenu && (
+        <>
+          <div className="context-menu-overlay" onClick={closeContextMenu} />
+          <div 
+            className="context-menu"
+            style={{
+              left: `${pageContextMenu.x}px`,
+              top: `${pageContextMenu.y}px`
+            }}
+          >
+            {pageContextMenu.linkUrl && (
+              <>
+                <div className="context-menu-item" onClick={async () => {
+                  const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                  const newViewId = `view-${newTabId}`
+                  const newTab: Tab = {
+                    id: newTabId,
+                    viewId: newViewId,
+                    url: pageContextMenu.linkUrl!,
+                    title: 'Loading...',
+                    groupId: null
+                  }
+                  if (window.electronAPI) {
+                    await window.electronAPI.createBrowserView(newViewId, pageContextMenu.linkUrl!)
+                  }
+                  setTabs(prevTabs => [...prevTabs, newTab])
+                  setActiveTabId(newTabId)
+                  closeContextMenu()
+                }}>
+                  Open Link in New Tab
+                </div>
+                <div className="context-menu-item" onClick={() => {
+                  navigator.clipboard.writeText(pageContextMenu.linkUrl!)
+                  closeContextMenu()
+                }}>
+                  Copy Link Address
+                </div>
+                <div className="context-menu-separator" />
+              </>
+            )}
+            {pageContextMenu.imageUrl && (
+              <>
+                <div className="context-menu-item" onClick={async () => {
+                  const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                  const newViewId = `view-${newTabId}`
+                  const newTab: Tab = {
+                    id: newTabId,
+                    viewId: newViewId,
+                    url: pageContextMenu.imageUrl!,
+                    title: 'Image',
+                    groupId: null
+                  }
+                  if (window.electronAPI) {
+                    await window.electronAPI.createBrowserView(newViewId, pageContextMenu.imageUrl!)
+                  }
+                  setTabs(prevTabs => [...prevTabs, newTab])
+                  setActiveTabId(newTabId)
+                  closeContextMenu()
+                }}>
+                  Open Image in New Tab
+                </div>
+                <div className="context-menu-item" onClick={() => {
+                  navigator.clipboard.writeText(pageContextMenu.imageUrl!)
+                  closeContextMenu()
+                }}>
+                  Copy Image Address
+                </div>
+                <div className="context-menu-separator" />
+              </>
+            )}
+            <div className="context-menu-item" onClick={() => { goBack(); closeContextMenu(); }}>
+              ← Back
+            </div>
+            <div className="context-menu-item" onClick={() => { goForward(); closeContextMenu(); }}>
+              Forward →
+            </div>
+            <div className="context-menu-item" onClick={() => { reload(); closeContextMenu(); }}>
+              Reload
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Undo popup for closed groups */}
       {undoGroupClose && (
         <div className="undo-popup">
@@ -2402,12 +2891,19 @@ function App() {
                   <button 
                     className="btn-primary" 
                     onClick={() => {
-                      selectedTabsForBookmark.forEach(tabId => {
-                        const tab = tabs.find(t => t.id === tabId)
-                        if (tab) {
+                      const tabsToBookmark = Array.from(selectedTabsForBookmark)
+                        .map(tabId => tabs.find(t => t.id === tabId))
+                        .filter(tab => tab !== undefined)
+                      
+                      tabsToBookmark.forEach((tab, index) => {
+                        // Add slight delay to ensure unique timestamps
+                        setTimeout(() => {
                           addBookmark(tab.url, tab.title)
-                        }
+                        }, index * 10)
                       })
+                      
+                      // Clear selection after bookmarking
+                      setSelectedTabsForBookmark(new Set())
                     }}
                     disabled={selectedTabsForBookmark.size === 0}
                   >
@@ -2421,15 +2917,19 @@ function App() {
                         onClick={() => {
                           const folderName = group.name || 'Group Bookmarks'
                           const folderId = createBookmarkFolder(folderName)
-                          group.tabIds.forEach(tabId => {
-                            const tab = tabs.find(t => t.id === tabId)
-                            if (tab && tab.url !== 'about:blank') {
+                          const tabsToBookmark = group.tabIds
+                            .map(tabId => tabs.find(t => t.id === tabId))
+                            .filter((tab): tab is Tab => tab !== undefined && tab.url !== 'about:blank')
+                          
+                          tabsToBookmark.forEach((tab, index) => {
+                            // Add slight delay to ensure unique timestamps
+                            setTimeout(() => {
                               addBookmark(tab.url, tab.title, folderId)
-                            }
+                            }, index * 10)
                           })
                         }}
                       >
-                        📁 Bookmark All in Group ({group.tabIds.length})
+                        📁 Save "{group.name}" as Folder ({group.tabIds.length})
                       </button>
                     )
                   })()}
@@ -2438,6 +2938,52 @@ function App() {
                     onClick={() => setShowNewFolderInput(!showNewFolderInput)}
                   >
                     📁 New Folder
+                  </button>
+                  <button 
+                    className="btn-secondary" 
+                    onClick={() => {
+                      const dataStr = JSON.stringify({ bookmarks, bookmarkFolders }, null, 2)
+                      const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr)
+                      const exportFileDefaultName = `bookmarks-${new Date().toISOString().split('T')[0]}.json`
+                      const linkElement = document.createElement('a')
+                      linkElement.setAttribute('href', dataUri)
+                      linkElement.setAttribute('download', exportFileDefaultName)
+                      linkElement.click()
+                    }}
+                  >
+                    📤 Export
+                  </button>
+                  <button 
+                    className="btn-secondary" 
+                    onClick={() => {
+                      const input = document.createElement('input')
+                      input.type = 'file'
+                      input.accept = '.json'
+                      input.onchange = (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0]
+                        if (file) {
+                          const reader = new FileReader()
+                          reader.onload = (event) => {
+                            try {
+                              const data = JSON.parse(event.target?.result as string)
+                              if (data.bookmarks && data.bookmarkFolders) {
+                                setBookmarks(data.bookmarks)
+                                setBookmarkFolders(data.bookmarkFolders)
+                                alert('Bookmarks imported successfully!')
+                              } else {
+                                alert('Invalid bookmark file format')
+                              }
+                            } catch (error) {
+                              alert('Failed to import bookmarks')
+                            }
+                          }
+                          reader.readAsText(file)
+                        }
+                      }
+                      input.click()
+                    }}
+                  >
+                    📥 Import
                   </button>
                 </div>
                 {showNewFolderInput && (
@@ -2486,7 +3032,81 @@ function App() {
               <div className="bookmark-list">
                 {bookmarkFolders.map(folder => (
                   <div key={folder.id} className="bookmark-folder">
-                    <div className="bookmark-folder-name">📁 {folder.name}</div>
+                    <div className="bookmark-folder-header">
+                      <div 
+                        className="bookmark-folder-name"
+                        onClick={async () => {
+                          // Get all bookmarks in this folder
+                          const folderBookmarks = bookmarks.filter(b => b.folderId === folder.id)
+                          
+                          if (folderBookmarks.length === 0) return
+                          
+                          // Create a new group for these bookmarks
+                          const newGroupId = `group-${Date.now()}`
+                          const newTabIds: string[] = []
+                          
+                          // Create tabs for each bookmark
+                          for (const bookmark of folderBookmarks) {
+                            const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                            const newViewId = `view-${newTabId}`
+                            
+                            const newTab: Tab = {
+                              id: newTabId,
+                              viewId: newViewId,
+                              url: bookmark.url,
+                              title: bookmark.title || bookmark.url,
+                              groupId: newGroupId
+                            }
+                            
+                            newTabIds.push(newTabId)
+                            
+                            if (window.electronAPI) {
+                              await window.electronAPI.createBrowserView(newViewId, bookmark.url)
+                            }
+                            
+                            setTabs(prevTabs => [...prevTabs, newTab])
+                            
+                            // Small delay between tab creations
+                            await new Promise(resolve => setTimeout(resolve, 50))
+                          }
+                          
+                          // Create the group
+                          const newGroup: Group = {
+                            id: newGroupId,
+                            name: folder.name,
+                            tabIds: newTabIds,
+                            collapsed: false
+                          }
+                          
+                          setGroups(prevGroups => [...prevGroups, newGroup])
+                          
+                          // Switch to the first tab of the new group
+                          if (newTabIds.length > 0) {
+                            setActiveTabId(newTabIds[0])
+                          }
+                          
+                          setShowBookmarks(false)
+                        }}
+                        style={{ cursor: folder.id !== 'root' && bookmarks.filter(b => b.folderId === folder.id).length > 0 ? 'pointer' : 'default' }}
+                        title={folder.id !== 'root' && bookmarks.filter(b => b.folderId === folder.id).length > 0 ? 'Click to restore all bookmarks as a new group' : ''}
+                      >
+                        📁 {folder.name}
+                      </div>
+                      {folder.id !== 'root' && (
+                        <button 
+                          className="folder-delete"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (confirm(`Delete folder "${folder.name}" and all its bookmarks?`)) {
+                              removeBookmarkFolder(folder.id)
+                            }
+                          }}
+                          title="Delete folder"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
                     {bookmarks
                       .filter(b => b.folderId === folder.id)
                       .map(bookmark => (
@@ -2495,7 +3115,33 @@ function App() {
                             className="bookmark-link"
                             onClick={async () => {
                               if (window.electronAPI) {
-                                await window.electronAPI.viewLoadURL(activeTab?.viewId || '', bookmark.url)
+                                if (activeTab) {
+                                  // If there's an active tab, navigate it to the URL
+                                  await window.electronAPI.viewLoadURL(activeTab.viewId, bookmark.url)
+                                  setTabs(prevTabs => 
+                                    prevTabs.map(t => 
+                                      t.id === activeTab.id 
+                                        ? { ...t, url: bookmark.url, title: bookmark.title || bookmark.url }
+                                        : t
+                                    )
+                                  )
+                                } else {
+                                  // If no active tab, create a new one
+                                  const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                                  const newViewId = `view-${newTabId}`
+                                  
+                                  const newTab: Tab = {
+                                    id: newTabId,
+                                    viewId: newViewId,
+                                    url: bookmark.url,
+                                    title: bookmark.title || bookmark.url,
+                                    groupId: null
+                                  }
+                                  
+                                  await window.electronAPI.createBrowserView(newViewId, bookmark.url)
+                                  setTabs(prevTabs => [...prevTabs, newTab])
+                                  setActiveTabId(newTabId)
+                                }
                                 setShowBookmarks(false)
                               }
                             }}
@@ -2547,8 +3193,34 @@ function App() {
                     <div 
                       className="history-link"
                       onClick={async () => {
-                        if (window.electronAPI && activeTab) {
-                          await window.electronAPI.viewLoadURL(activeTab.viewId, item.url)
+                        if (window.electronAPI) {
+                          // Always create a new tab for history items
+                          const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                          const newViewId = `view-${newTabId}`
+                          
+                          const newTab: Tab = {
+                            id: newTabId,
+                            viewId: newViewId,
+                            url: item.url,
+                            title: item.title || item.url,
+                            groupId: activeTab?.groupId || null
+                          }
+                          
+                          await window.electronAPI.createBrowserView(newViewId, item.url)
+                          setTabs(prevTabs => [...prevTabs, newTab])
+                          setActiveTabId(newTabId)
+                          
+                          // If the active tab was in a group, add the new tab to that group
+                          if (activeTab?.groupId) {
+                            setGroups(prevGroups => 
+                              prevGroups.map(g => 
+                                g.id === activeTab.groupId 
+                                  ? { ...g, tabIds: [...g.tabIds, newTabId] }
+                                  : g
+                              )
+                            )
+                          }
+                          
                           setShowHistory(false)
                         }
                       }}
@@ -2760,11 +3432,371 @@ function App() {
                     Private Browsing Mode
                   </label>
                 </div>
+                <div className="setting-item">
+                  <label>
+                    <input 
+                      type="checkbox"
+                      checked={settings.adBlockEnabled}
+                      onChange={(e) => setSettings({...settings, adBlockEnabled: e.target.checked})}
+                    />
+                    Enable Ad Blocker
+                  </label>
+                </div>
+              </div>
+              <div className="settings-section">
+                <h3>Performance</h3>
+                <div className="setting-item">
+                  <label>
+                    <input 
+                      type="checkbox"
+                      checked={settings.autoSleepTabs}
+                      onChange={(e) => setSettings({...settings, autoSleepTabs: e.target.checked})}
+                    />
+                    Auto-sleep Inactive Tabs
+                  </label>
+                </div>
+                <div className="setting-item">
+                  <label>Sleep tabs after (minutes):</label>
+                  <input 
+                    type="number"
+                    min="5"
+                    max="120"
+                    value={settings.sleepTabsAfter}
+                    onChange={(e) => setSettings({...settings, sleepTabsAfter: parseInt(e.target.value) || 30})}
+                    disabled={!settings.autoSleepTabs}
+                  />
+                </div>
+              </div>
+              <div className="settings-section">
+                <h3>Appearance</h3>
+                <div className="setting-item">
+                  <label>UI Scale:</label>
+                  <input 
+                    type="range"
+                    min="80"
+                    max="150"
+                    value={settings.uiScale}
+                    onChange={(e) => setSettings({...settings, uiScale: parseInt(e.target.value)})}
+                  />
+                  <span>{settings.uiScale}%</span>
+                </div>
+                <div className="setting-item">
+                  <label>Theme:</label>
+                  <select 
+                    value={settings.customTheme}
+                    onChange={(e) => setSettings({...settings, customTheme: e.target.value})}
+                  >
+                    <option value="default">Default</option>
+                    <option value="blue">Blue</option>
+                    <option value="green">Green</option>
+                    <option value="purple">Purple</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                {settings.customTheme === 'custom' && (
+                  <>
+                    <div className="setting-item">
+                      <label>Primary Color:</label>
+                      <input 
+                        type="color"
+                        value={customTheme.primaryColor}
+                        onChange={(e) => setCustomTheme({...customTheme, primaryColor: e.target.value})}
+                      />
+                    </div>
+                    <div className="setting-item">
+                      <label>Background Color:</label>
+                      <input 
+                        type="color"
+                        value={customTheme.backgroundColor}
+                        onChange={(e) => setCustomTheme({...customTheme, backgroundColor: e.target.value})}
+                      />
+                    </div>
+                    <div className="setting-item">
+                      <label>Text Color:</label>
+                      <input 
+                        type="color"
+                        value={customTheme.textColor}
+                        onChange={(e) => setCustomTheme({...customTheme, textColor: e.target.value})}
+                      />
+                    </div>
+                    <div className="setting-item">
+                      <label>Accent Color:</label>
+                      <input 
+                        type="color"
+                        value={customTheme.accentColor}
+                        onChange={(e) => setCustomTheme({...customTheme, accentColor: e.target.value})}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
               <div className="settings-section">
                 <h3>About</h3>
                 <p>WideScreen Browser v0.1.0</p>
                 <p>A multi-panel browser with advanced management features</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Help */}
+      {showKeyboardHelp && (
+        <div className="modal-overlay" onClick={() => setShowKeyboardHelp(false)}>
+          <div className="modal-panel large" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Keyboard Shortcuts</h2>
+              <button className="modal-close" onClick={() => setShowKeyboardHelp(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="shortcuts-section">
+                <h3>Tab Management</h3>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + T</kbd>
+                  <span>New Tab</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + W</kbd>
+                  <span>Close Tab</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + Shift + T</kbd>
+                  <span>Reopen Closed Tab</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + Tab</kbd>
+                  <span>Next Tab</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + Shift + Tab</kbd>
+                  <span>Previous Tab</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + P</kbd>
+                  <span>Pin/Unpin Tab</span>
+                </div>
+              </div>
+              <div className="shortcuts-section">
+                <h3>Navigation</h3>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + L</kbd>
+                  <span>Focus URL Bar</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + R</kbd>
+                  <span>Reload Page</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Alt + Left</kbd>
+                  <span>Go Back</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Alt + Right</kbd>
+                  <span>Go Forward</span>
+                </div>
+              </div>
+              <div className="shortcuts-section">
+                <h3>Bookmarks & History</h3>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + D</kbd>
+                  <span>Bookmark Current Page</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + B</kbd>
+                  <span>Show Bookmarks</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + H</kbd>
+                  <span>Show History</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + Shift + H</kbd>
+                  <span>Show Recently Closed Tabs</span>
+                </div>
+              </div>
+              <div className="shortcuts-section">
+                <h3>Other</h3>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + F</kbd>
+                  <span>Find in Page</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + ,</kbd>
+                  <span>Settings</span>
+                </div>
+                <div className="shortcut-item">
+                  <kbd>Ctrl/Cmd + /</kbd>
+                  <span>Show Keyboard Shortcuts</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recently Closed */}
+      {showRecentlyClosed && (
+        <div className="modal-overlay" onClick={() => setShowRecentlyClosed(false)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Recently Closed</h2>
+              <button className="modal-close" onClick={() => setShowRecentlyClosed(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              {/* Recently Closed Groups */}
+              {recentlyClosedGroups.length > 0 && (
+                <div style={{ marginBottom: '30px' }}>
+                  <h3 style={{ fontSize: '14px', color: '#a0aec0', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Recently Closed Groups</h3>
+                  <div className="history-list">
+                    {[...recentlyClosedGroups].map((closedGroup, index) => (
+                      <div key={`group-${closedGroup.group.id}-${index}`} className="history-item">
+                        <div 
+                          className="history-link"
+                          onClick={async () => {
+                            // Restore the group
+                            const newGroup = { ...closedGroup.group }
+                            const newTabs: Tab[] = []
+                            const newTabIds: string[] = []
+                            
+                            for (const oldTab of closedGroup.tabs) {
+                              const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                              const newViewId = `view-${newTabId}`
+                              
+                              const newTab: Tab = {
+                                id: newTabId,
+                                viewId: newViewId,
+                                url: oldTab.url,
+                                title: oldTab.title,
+                                groupId: newGroup.id
+                              }
+                              
+                              if (window.electronAPI) {
+                                await window.electronAPI.createBrowserView(newViewId, oldTab.url)
+                              }
+                              
+                              newTabs.push(newTab)
+                              newTabIds.push(newTabId)
+                            }
+                            
+                            newGroup.tabIds = newTabIds
+                            setGroups(prev => [...prev, newGroup])
+                            setTabs(prev => [...prev, ...newTabs])
+                            if (newTabs.length > 0) {
+                              setActiveTabId(newTabs[0].id)
+                            }
+                            if (closedGroup.splitWidths.length > 0) {
+                              setGroupSplitWidths(prev => ({ ...prev, [newGroup.id]: closedGroup.splitWidths }))
+                            }
+                            
+                            // Remove from recently closed
+                            setRecentlyClosedGroups(prev => prev.filter((_, i) => i !== index))
+                            setShowRecentlyClosed(false)
+                          }}
+                        >
+                          <div className="history-title">{closedGroup.group.name}</div>
+                          <div className="history-url">{closedGroup.tabs.length} tab{closedGroup.tabs.length !== 1 ? 's' : ''}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {/* Recently Closed Tabs */}
+              <div>
+                <h3 style={{ fontSize: '14px', color: '#a0aec0', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Recently Closed Tabs</h3>
+                {recentlyClosed.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: '#718096', padding: '40px 20px' }}>
+                    No recently closed tabs
+                  </div>
+                ) : (
+                  <div className="history-list">
+                    {[...recentlyClosed].reverse().map((tab, index) => (
+                      <div key={`${tab.id}-${index}`} className="history-item">
+                        <div 
+                          className="history-link"
+                          onClick={async () => {
+                            const newTabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                            const newViewId = `view-${newTabId}`
+                            
+                            const newTab: Tab = {
+                              id: newTabId,
+                              viewId: newViewId,
+                              url: tab.url,
+                              title: tab.title,
+                              groupId: null
+                            }
+                            
+                            if (window.electronAPI) {
+                              await window.electronAPI.createBrowserView(newViewId, tab.url)
+                            }
+                            
+                            setTabs(prevTabs => [...prevTabs, newTab])
+                            setActiveTabId(newTabId)
+                            setShowRecentlyClosed(false)
+                          }}
+                        >
+                          <div className="history-title">{tab.title || tab.url}</div>
+                          <div className="history-url">{tab.url}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Performance Monitor */}
+      {showPerformance && (
+        <div className="modal-overlay" onClick={() => setShowPerformance(false)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Performance Monitor</h2>
+              <button className="modal-close" onClick={() => setShowPerformance(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="performance-stats">
+                <div className="perf-stat-item">
+                  <h3>Memory Usage</h3>
+                  <div className="memory-bar">
+                    <div 
+                      className="memory-bar-fill"
+                      style={{ width: `${(memoryUsage.used / memoryUsage.total) * 100}%` }}
+                    />
+                  </div>
+                  <p>{memoryUsage.used} MB / {memoryUsage.total} MB</p>
+                </div>
+                
+                <div className="perf-stat-item">
+                  <h3>Active Tabs</h3>
+                  <p className="perf-stat-value">{tabs.length - sleepingTabs.size} / {tabs.length}</p>
+                </div>
+                
+                <div className="perf-stat-item">
+                  <h3>Sleeping Tabs</h3>
+                  <p className="perf-stat-value">{sleepingTabs.size}</p>
+                  {sleepingTabs.size > 0 && (
+                    <div className="sleeping-tabs-list">
+                      {Array.from(sleepingTabs).map(tabId => {
+                        const tab = tabs.find(t => t.id === tabId)
+                        return tab ? (
+                          <div key={tabId} className="sleeping-tab-item">
+                            <span>{tab.title}</span>
+                            <button onClick={() => wakeTab(tabId)}>Wake</button>
+                          </div>
+                        ) : null
+                      })}
+                    </div>
+                  )}
+                </div>
+                
+                <div className="perf-stat-item">
+                  <h3>Groups</h3>
+                  <p className="perf-stat-value">{groups.length}</p>
+                </div>
               </div>
             </div>
           </div>

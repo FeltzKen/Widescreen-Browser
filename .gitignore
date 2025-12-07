@@ -29,3 +29,7 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# All MarkDown files except the main readme
+*.md
+!README.md

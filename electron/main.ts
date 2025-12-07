@@ -97,6 +97,31 @@ ipcMain.handle('create-browser-view', async (_event, viewId: string, url: string
     mainWindow?.webContents.send('view-title-updated', viewId, title)
   })
 
+  // Favicon updated
+  view.webContents.on('page-favicon-updated', (_event, favicons: string[]) => {
+    if (favicons.length > 0) {
+      mainWindow?.webContents.send('view-favicon-updated', viewId, favicons[0])
+    }
+  })
+
+  // Loading state
+  view.webContents.on('did-start-loading', () => {
+    mainWindow?.webContents.send('view-loading-changed', viewId, true)
+  })
+
+  view.webContents.on('did-stop-loading', () => {
+    mainWindow?.webContents.send('view-loading-changed', viewId, false)
+  })
+
+  // Audio playing state
+  view.webContents.on('media-started-playing', () => {
+    mainWindow?.webContents.send('view-audio-changed', viewId, true)
+  })
+
+  view.webContents.on('media-paused', () => {
+    mainWindow?.webContents.send('view-audio-changed', viewId, false)
+  })
+
   return viewId
 })
 
@@ -159,6 +184,17 @@ ipcMain.handle('clear-cache', async () => {
   } catch (error) {
     console.error('Failed to clear cache:', error)
     return { success: false, error }
+  }
+})
+
+ipcMain.handle('toggle-devtools', async (_event, viewId: string) => {
+  const view = browserViews.get(viewId)
+  if (view) {
+    if (view.webContents.isDevToolsOpened()) {
+      view.webContents.closeDevTools()
+    } else {
+      view.webContents.openDevTools()
+    }
   }
 })
 

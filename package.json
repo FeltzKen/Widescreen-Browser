@@ -8,8 +8,7 @@
     "dev": "vite",
     "build": "vite build && electron-builder && npm run fix-permissions",
     "build:win": "vite build && electron-builder --win",
-    "build:linux": "vite build && electron-builder --linux && npm run fix-permissions",
-    "fix-permissions": "sudo chown root:root release/linux-unpacked/chrome-sandbox && sudo chmod 4755 release/linux-unpacked/chrome-sandbox",
+    "build:linux": "vite build && electron-builder --linux",
     "preview": "vite preview",
     "electron:dev": "node scripts/dev-runner.js",
     "electron:build": "npm run build"
@@ -58,7 +57,13 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Network",
-      "maintainer": "Feltz.Kenneth@gmail.com"
+      "maintainer": "Feltz.Kenneth@gmail.com",
+      "desktop": {
+        "StartupWMClass": "widescreen-browser",
+        "Terminal": "false",
+        "Type": "Application",
+        "Categories": "Network;WebBrowser;"
+      }
     },
     "win": {
       "target": [
