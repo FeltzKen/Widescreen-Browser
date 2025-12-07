@@ -1,4 +1,4 @@
-# WideScreen Split Tab Browser - Feature Summary
+# WideScreen Browser - Feature Summary
 
 ## Implemented Features (v0.1.0)
 

@@ -1,6 +1,6 @@
-# WideScreen Split Tab Browser
+# WideScreen Browser
 
-A feature-rich, widescreen-focused web browser built with Electron that allows multiple tabs to be displayed side-by-side in resizable panels with advanced tab management features.
+A feature-rich, widescreen-focused web browser built with Electron that allows multiple pages to be displayed side-by-side in resizable panels with advanced management features.
 
 ## Features
 

@@ -1,7 +1,7 @@
 {
   "name": "widescreen-browser",
   "version": "0.1.0",
-  "description": "A widescreen-focused web browser with side-by-side tab splitting",
+  "description": "A widescreen-focused web browser with advanced panel management",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
@@ -17,8 +17,8 @@
   "keywords": [
     "electron",
     "browser",
-    "split-tabs",
-    "widescreen"
+    "widescreen",
+    "panels"
   ],
   "author": {
     "name": "WideScreen Browser",

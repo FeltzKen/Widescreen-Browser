@@ -2084,20 +2084,20 @@ function App() {
           return activeTab?.url === 'about:blank' ? (
             <div className="splash-screen">
               <div className="splash-content">
-                <h1>WideScreen Split Browser</h1>
+                <h1>WideScreen Browser</h1>
                 
                 <div className="description-section">
                   <p className="description-text">
-                    A powerful browser designed for widescreen displays with side-by-side tab splitting, 
+                    A powerful browser designed for widescreen displays with side-by-side panels, 
                     perfect for multitasking and comparing content.
                   </p>
                   <div className="features-grid">
                     <div className="feature-item">
                       <strong>🔀 Split Views</strong>
-                      <span>Create groups and view multiple tabs side-by-side</span>
+                      <span>Create groups and view multiple pages side-by-side</span>
                     </div>
                     <div className="feature-item">
-                      <strong>📌 Pin Tabs</strong>
+                      <strong>📌 Pin Pages</strong>
                       <span>Keep important tabs always accessible</span>
                     </div>
                     <div className="feature-item">
@@ -2211,16 +2211,16 @@ function App() {
               }}
             >
               <div className="splash-content">
-                <h1>WideScreen Split Browser</h1>
+                <h1>WideScreen Browser</h1>
                 
                 <div className="description-section compact">
                   <p className="description-text">
-                    A powerful browser designed for widescreen displays with side-by-side tab splitting.
+                    A powerful browser designed for widescreen displays with side-by-side panels.
                   </p>
                   <div className="features-grid">
                     <div className="feature-item">
                       <strong>🔀 Split Views</strong>
-                      <span>Multiple tabs side-by-side</span>
+                      <span>Multiple pages side-by-side</span>
                     </div>
                     <div className="feature-item">
                       <strong>📌 Pin & Organize</strong>
@@ -2763,8 +2763,8 @@ function App() {
               </div>
               <div className="settings-section">
                 <h3>About</h3>
-                <p>WideScreen Split Tab Browser v0.1.0</p>
-                <p>A multi-panel browser with advanced tab management</p>
+                <p>WideScreen Browser v0.1.0</p>
+                <p>A multi-panel browser with advanced management features</p>
               </div>
             </div>
           </div>
