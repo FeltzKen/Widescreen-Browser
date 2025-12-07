@@ -1,0 +1,138 @@
+import { useState, useEffect } from 'react'
+import './App.css'
+
+function App() {
+  const [url, setUrl] = useState('about:blank')
+  const [urlInput, setUrlInput] = useState('')
+
+  // Initialize single browser view on mount
+  useEffect(() => {
+    if (!window.electronAPI) {
+      console.error('electronAPI not available')
+      return
+    }
+
+    const init = async () => {
+      await window.electronAPI.createBrowserView('main-view', url)
+      updateViewBounds()
+    }
+
+    init()
+
+    // Handle window resize
+    window.addEventListener('resize', updateViewBounds)
+    return () => {
+      window.removeEventListener('resize', updateViewBounds)
+      window.electronAPI?.removeBrowserView('main-view')
+    }
+  }, [])
+
+  const updateViewBounds = () => {
+    if (!window.electronAPI) return
+
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const toolbarHeight = 60
+
+    // Hide view if showing splash (about:blank)
+    const shouldHide = url === 'about:blank'
+
+    window.electronAPI.updateViewBounds('main-view', {
+      x: 0,
+      y: toolbarHeight,
+      width: windowWidth,
+      height: shouldHide ? 0 : windowHeight - toolbarHeight
+    })
+  }
+
+  const navigate = () => {
+    if (!urlInput.trim() || !window.electronAPI) return
+
+    let finalUrl = urlInput.trim()
+    
+    // Check if it's a URL or search query
+    if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.includes('.')) {
+      // It's a search query - use DuckDuckGo
+      finalUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(finalUrl)
+    } else if (!/^https?:\/\//i.test(finalUrl)) {
+      // It's a domain without protocol
+      finalUrl = 'https://' + finalUrl
+    }
+
+    window.electronAPI.navigateView('main-view', finalUrl)
+    setUrl(finalUrl)
+    setUrlInput('')
+  }
+
+  const goBack = () => window.electronAPI?.viewGoBack('main-view')
+  const goForward = () => window.electronAPI?.viewGoForward('main-view')
+  const reload = () => window.electronAPI?.viewReload('main-view')
+
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="nav-controls">
+          <button onClick={goBack}>←</button>
+          <button onClick={goForward}>→</button>
+          <button onClick={reload}>⟳</button>
+        </div>
+
+        <input
+          type="text"
+          className="url-input"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && navigate()}
+          placeholder="Enter URL or search..."
+        />
+
+        <button onClick={navigate}>Go</button>
+      </div>
+
+      {url === 'about:blank' && (
+        <div className="splash-screen">
+          <div className="splash-content">
+            <h1>WideScreen Split Browser</h1>
+            
+            <div className="search-container">
+              <input
+                type="text"
+                className="search-input"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && navigate()}
+                placeholder="Search DuckDuckGo or enter URL..."
+                autoFocus
+              />
+              <button className="search-button" onClick={navigate}>Search</button>
+            </div>
+
+            <p className="quick-start-label">Quick Start</p>
+            <div className="quick-links">
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('github.com'); navigate(); }}>
+                GitHub
+              </a>
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('youtube.com'); navigate(); }}>
+                YouTube
+              </a>
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('reddit.com'); navigate(); }}>
+                Reddit
+              </a>
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('twitter.com'); navigate(); }}>
+                Twitter
+              </a>
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('netflix.com'); navigate(); }}>
+                Netflix
+              </a>
+              <a href="#" onClick={(e) => { e.preventDefault(); setUrlInput('amazon.com'); navigate(); }}>
+                Amazon
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default App

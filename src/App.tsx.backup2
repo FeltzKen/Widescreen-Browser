@@ -1,0 +1,901 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import './App.css'
+
+interface Tab {
+  id: string
+  url: string
+  title: string
+  groupId?: string // Optional group identifier
+}
+
+interface Pane {
+  id: string
+  tabIds: string[] // For grouped panes, this will have one tab each
+  activeTabId: string
+  width: number // percentage
+}
+
+interface TabGroup {
+  id: string
+  tabIds: string[] // The tabs that belong to this group
+}
+
+function App() {
+  const [tabs, setTabs] = useState<Tab[]>([
+    { id: 'tab-1', url: 'https://github.com', title: 'GitHub' }
+  ])
+  const [panes, setPanes] = useState<Pane[]>([
+    { id: 'pane-1', tabIds: ['tab-1'], activeTabId: 'tab-1', width: 100 }
+  ])
+  const [activeTabId, setActiveTabId] = useState('tab-1')
+  const [urlInput, setUrlInput] = useState('')
+  const [selectedTabIds, setSelectedTabIds] = useState<string[]>([])
+  const [tabGroups, setTabGroups] = useState<TabGroup[]>([])
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null)
+  const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; groupId: string; tabId: string } | null>(null)
+
+  // Refs for accessing latest state in callbacks
+  const panesRef = useRef<Pane[]>(panes)
+  useEffect(() => { panesRef.current = panes }, [panes])
+  const tabsRef = useRef<Tab[]>(tabs)
+  useEffect(() => { tabsRef.current = tabs }, [tabs])
+
+  // Heights (px) used to compute BrowserView top offset. Keep in sync with CSS.
+  const TOOLBAR_HEIGHT = 56 // px (toolbar)
+  const TABS_BAR_HEIGHT = 44 // px (tabs bar)
+
+  // Initialize browser views when panes change
+  useEffect(() => {
+    if (!window.electronAPI) {
+      console.error('electronAPI not available')
+      return
+    }
+
+    const initViews = async () => {
+      // Create a BrowserView for each pane
+      for (const pane of panes) {
+        const activeTab = pane.activeTabId
+        const tab = tabs.find(t => t.id === activeTab)
+        if (tab) {
+          await window.electronAPI.createBrowserView(pane.id, tab.url)
+        }
+      }
+      updatePaneBounds()
+    }
+    initViews()
+
+    return () => {
+      panes.forEach(pane => {
+        window.electronAPI?.removeBrowserView(pane.id)
+      })
+    }
+  }, [panes.map(p => p.id).join(',')]) // Re-init when pane IDs change
+
+  // Update pane bounds when layout changes
+  const updatePaneBounds = useCallback(() => {
+    if (!window.electronAPI) return
+
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const topOffset = TOOLBAR_HEIGHT + TABS_BAR_HEIGHT
+    const contentHeight = Math.max(0, windowHeight - topOffset)
+
+    // Get active tab and its group
+    const activeTab = tabsRef.current.find(t => t.id === activeTabId)
+    const activeGroupId = activeTab?.groupId
+    
+    console.log('[updatePaneBounds] activeTabId:', activeTabId, 'activeGroupId:', activeGroupId, 'panes:', panesRef.current.map(p => p.id))
+    
+    // Determine which panes should be visible
+    let visiblePanes: Pane[] = []
+    
+    if (activeGroupId) {
+      // Show all panes in the active group
+      const group = tabGroups.find(g => g.id === activeGroupId)
+      console.log('[updatePaneBounds] Found group:', group)
+      if (group) {
+        visiblePanes = panesRef.current.filter(p => 
+          group.tabIds.some(tid => p.tabIds.includes(tid))
+        )
+        console.log('[updatePaneBounds] Visible panes for group:', visiblePanes.map(p => p.id))
+      }
+    } else {
+      // Show only the pane containing the active tab
+      const activePane = panesRef.current.find(p => p.tabIds.includes(activeTabId))
+      console.log('[updatePaneBounds] Found active pane:', activePane?.id)
+      if (activePane) {
+        visiblePanes = [activePane]
+      }
+    }
+
+    // Hide all panes first
+    panesRef.current.forEach(pane => {
+      if (!visiblePanes.includes(pane)) {
+        console.log(`[updatePaneBounds] Hiding pane ${pane.id}`)
+        window.electronAPI.updateViewBounds(pane.id, {
+          x: 0,
+          y: topOffset,
+          width: 0,
+          height: 0
+        })
+      }
+    })
+
+    // Show and position visible panes
+    let xOffset = 0
+    visiblePanes.forEach((pane, index) => {
+      const width = index === visiblePanes.length - 1 
+        ? windowWidth - xOffset 
+        : Math.floor(windowWidth / visiblePanes.length)
+      
+      const paneTab = tabsRef.current.find(t => t.id === pane.activeTabId)
+      const hide = paneTab?.url === 'about:blank'
+      const h = hide ? 0 : contentHeight
+      
+      console.log(`[updatePaneBounds] Showing pane ${pane.id}:`, { x: xOffset, y: topOffset, width, height: h })
+      window.electronAPI.updateViewBounds(pane.id, {
+        x: xOffset,
+        y: topOffset,
+        width: width,
+        height: h
+      })
+      xOffset += width
+    })
+  }, [activeTabId, tabGroups, panes])
+
+  useEffect(() => {
+    updatePaneBounds()
+    window.addEventListener('resize', updatePaneBounds)
+    return () => window.removeEventListener('resize', updatePaneBounds)
+  }, [updatePaneBounds])
+  
+  // Update bounds whenever panes change
+  useEffect(() => {
+    console.log('[useEffect] Panes changed, current panes:', panes.map(p => ({ id: p.id, tabIds: p.tabIds, width: p.width })))
+    updatePaneBounds()
+  }, [panes, updatePaneBounds])
+  
+  // Update bounds when active tab changes
+  useEffect(() => {
+    console.log('[useEffect] Active tab changed:', activeTabId)
+    updatePaneBounds()
+  }, [activeTabId, updatePaneBounds])
+
+  // Listen for navigation events
+
+  useEffect(() => {
+    if (!window.electronAPI) return
+
+    // Register navigation/title listeners once and use panesRef to read latest panes
+    const onNav = (viewId: string, url: string) => {
+      const pane = panesRef.current.find(p => p.id === viewId)
+      if (pane) {
+        console.log('[DEBUG] onViewNavigated', { viewId, url, paneActive: pane.activeTabId })
+        setTabs(prev => prev.map(tab => 
+          tab.id === pane.activeTabId ? { ...tab, url } : tab
+        ))
+      }
+    }
+
+    const onTitle = (viewId: string, title: string) => {
+      const pane = panesRef.current.find(p => p.id === viewId)
+      if (pane) {
+        setTabs(prev => prev.map(tab => 
+          tab.id === pane.activeTabId ? { ...tab, title } : tab
+        ))
+      }
+    }
+
+    window.electronAPI.onViewNavigated(onNav)
+    window.electronAPI.onViewTitleUpdated(onTitle)
+
+    return () => {
+      // remove listeners when component unmounts
+      ;(window.electronAPI as any).offViewNavigated?.()
+      ;(window.electronAPI as any).offViewTitleUpdated?.()
+    }
+  }, [])
+
+  // Update BrowserView bounds to hide the view when active tab is about:blank
+  const adjustViewVisibility = useCallback(() => {
+    if (!window.electronAPI) return
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const topOffset = TOOLBAR_HEIGHT + TABS_BAR_HEIGHT
+    const contentHeight = Math.max(0, windowHeight - topOffset)
+
+    panesRef.current.forEach(pane => {
+      const activeTab = tabsRef.current.find(t => t.id === pane.activeTabId)
+      const hide = activeTab?.url === 'about:blank'
+      const h = hide ? 0 : contentHeight
+      window.electronAPI.updateViewBounds(pane.id, {
+        x: 0,
+        y: topOffset,
+        width: Math.floor((windowWidth * pane.width) / 100),
+        height: h
+      })
+    })
+  }, [])
+
+  useEffect(() => {
+    // run whenever active tab or tabs change
+    adjustViewVisibility()
+  }, [activeTabId, tabs, adjustViewVisibility])
+
+  const createNewTab = () => {
+    const newTabId = `tab-${Date.now()}`
+    const newTab: Tab = {
+      id: newTabId,
+      url: 'about:blank',
+      title: 'New Tab'
+    }
+    // Append the new tab to the tab list and attach to the primary pane
+    setTabs(prev => [...prev, newTab])
+    setPanes(prev => prev.map((p, idx) => idx === 0 ? { ...p, tabIds: [...p.tabIds, newTabId], activeTabId: newTabId } : p))
+    // Navigate the primary pane's BrowserView to the new tab (about:blank)
+    const primary = panes[0]
+    if (primary) {
+      window.electronAPI?.navigateView(primary.id, newTab.url)
+    }
+    setActiveTabId(newTabId)
+  }
+
+  // Grouping and splitting removed — single primary pane model in use.
+
+  const navigateActivePane = () => {
+    if (!urlInput.trim() || !window.electronAPI) return
+
+    let url = urlInput.trim()
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://' + url
+    }
+
+    const activePane = panes.find(p => p.tabIds.includes(activeTabId))
+    if (activePane) {
+      console.log('[DEBUG] navigateActivePane', { activePaneId: activePane.id, activeTabId, url })
+      window.electronAPI.navigateView(activePane.id, url)
+      setTabs(prev => {
+        const res = prev.map(tab => tab.id === activeTabId ? { ...tab, url } : tab)
+        console.log('[DEBUG] tabs after navigate setTabs', res)
+        return res
+      })
+    }
+    setUrlInput('')
+  }
+
+  const activeTab = tabs.find(t => t.id === activeTabId)
+  const activePane = panes.find(p => p.tabIds.includes(activeTabId))
+
+  const shortTitle = (s: string) => {
+    if (!s) return ''
+    const parts = s.split(' - ')
+    let t = parts[0]
+    if (t.length > 20) t = t.slice(0, 17) + '...'
+    return t
+  }
+
+  const groupSelectedTabs = async () => {
+    if (selectedTabIds.length < 2) return
+    
+    console.log('[groupSelectedTabs] Grouping tabs:', selectedTabIds)
+    console.log('[groupSelectedTabs] Current panes:', panes.map(p => ({ id: p.id, tabIds: p.tabIds })))
+    
+    const groupId = `group-${Date.now()}`
+    
+    // Find panes containing selected tabs and extract orphaned tabs
+    const panesToHandle = panes.filter(p => 
+      p.tabIds.some(id => selectedTabIds.includes(id))
+    )
+    
+    // Collect tabs that will be orphaned (in affected panes but not selected)
+    const orphanedTabIds: string[] = []
+    panesToHandle.forEach(pane => {
+      pane.tabIds.forEach(tabId => {
+        if (!selectedTabIds.includes(tabId)) {
+          orphanedTabIds.push(tabId)
+        }
+      })
+    })
+    
+    console.log('[groupSelectedTabs] Panes to remove:', panesToHandle.map(p => p.id))
+    console.log('[groupSelectedTabs] Orphaned tabs needing new panes:', orphanedTabIds)
+    
+    // Remove BrowserViews for panes that will be replaced
+    for (const pane of panesToHandle) {
+      console.log(`[groupSelectedTabs] Removing BrowserView for pane ${pane.id}`)
+      if (window.electronAPI) {
+        await window.electronAPI.removeBrowserView(pane.id)
+      }
+    }
+    
+    // Create a pane for each selected tab (group members)
+    const newPanes: Pane[] = []
+    for (const tabId of selectedTabIds) {
+      const paneId = `pane-${tabId}`
+      const tab = tabs.find(t => t.id === tabId)
+      console.log('[groupSelectedTabs] Creating group pane:', paneId, 'for tab:', tab?.title)
+      if (tab && window.electronAPI) {
+        await window.electronAPI.createBrowserView(paneId, tab.url)
+      }
+      newPanes.push({
+        id: paneId,
+        tabIds: [tabId],
+        activeTabId: tabId,
+        width: 0
+      })
+    }
+    
+    // Create a pane for each orphaned tab
+    for (const tabId of orphanedTabIds) {
+      const paneId = `pane-${tabId}`
+      const tab = tabs.find(t => t.id === tabId)
+      console.log('[groupSelectedTabs] Creating orphan pane:', paneId, 'for tab:', tab?.title)
+      if (tab && window.electronAPI) {
+        await window.electronAPI.createBrowserView(paneId, tab.url)
+      }
+      newPanes.push({
+        id: paneId,
+        tabIds: [tabId],
+        activeTabId: tabId,
+        width: 0
+      })
+    }
+    
+    console.log('[groupSelectedTabs] Created new panes:', newPanes.map(p => p.id))
+    
+    // Mark tabs as grouped
+    setTabs(prev => prev.map(t => 
+      selectedTabIds.includes(t.id) ? { ...t, groupId } : t
+    ))
+    
+    // Add group to tabGroups
+    setTabGroups(prev => [...prev, { id: groupId, tabIds: selectedTabIds }])
+    
+    // Build new panes list: keep unaffected panes, add all new panes
+    setPanes(prev => {
+      const keepPanes = prev.filter(p => 
+        !p.tabIds.some(id => selectedTabIds.includes(id) || orphanedTabIds.includes(id))
+      )
+      
+      console.log('[groupSelectedTabs] Keeping unaffected panes:', keepPanes.map(p => p.id))
+      console.log('[groupSelectedTabs] Final panes:', [...keepPanes, ...newPanes].map(p => p.id))
+      
+      const allPanes = [...keepPanes, ...newPanes]
+      const updatedWidth = 100 / allPanes.length
+      return allPanes.map(p => ({ ...p, width: updatedWidth }))
+    })
+    
+    setSelectedTabIds([])
+  }
+
+  const ungroupPane = async (groupId: string) => {
+    const group = tabGroups.find(g => g.id === groupId)
+    if (!group) return
+    
+    // Remove group marking from tabs
+    setTabs(prev => prev.map(t => 
+      t.groupId === groupId ? { ...t, groupId: undefined } : t
+    ))
+    
+    // Remove the group
+    setTabGroups(prev => prev.filter(g => g.id !== groupId))
+    
+    // Remove panes for grouped tabs and merge into one pane
+    const firstTab = group.tabIds[0]
+    const newPaneId = `pane-${Date.now()}`
+    
+    setPanes(prev => {
+      // Remove panes for this group
+      const filtered = prev.filter(p => !group.tabIds.some(tid => p.tabIds.includes(tid)))
+      
+      // Create a single pane with all the ungrouped tabs
+      const newPane: Pane = {
+        id: newPaneId,
+        tabIds: group.tabIds,
+        activeTabId: firstTab,
+        width: 0
+      }
+      
+      const allPanes = [...filtered, newPane]
+      const updatedWidth = 100 / allPanes.length
+      return allPanes.map(p => ({ ...p, width: updatedWidth }))
+    })
+    
+    // Remove old BrowserViews for grouped tabs
+    for (const tabId of group.tabIds) {
+      const paneId = `pane-${tabId}`
+      if (window.electronAPI) {
+        await window.electronAPI.removeBrowserView(paneId)
+      }
+    }
+    
+    // Create new BrowserView for the merged pane
+    const tab = tabs.find(t => t.id === firstTab)
+    if (tab && window.electronAPI) {
+      await window.electronAPI.createBrowserView(newPaneId, tab.url)
+    }
+  }
+
+  const toggleTabSelection = (tabId: string) => {
+    setSelectedTabIds(prev => 
+      prev.includes(tabId) ? prev.filter(id => id !== tabId) : [...prev, tabId]
+    )
+  }
+
+  const addTabToGroup = async (tabId: string, groupId: string) => {
+    const tab = tabs.find(t => t.id === tabId)
+    if (!tab) return
+    
+    // Find the old pane containing this tab
+    const oldPane = panes.find(p => p.tabIds.includes(tabId))
+    
+    // Remove tab from its current pane
+    setPanes(prev => {
+      const updated = prev.map(p => ({
+        ...p,
+        tabIds: p.tabIds.filter(id => id !== tabId)
+      }))
+      return updated.filter(p => p.tabIds.length > 0)
+    })
+    
+    // If the old pane will be empty, remove its BrowserView
+    if (oldPane && oldPane.tabIds.length === 1 && oldPane.tabIds[0] === tabId) {
+      if (window.electronAPI) {
+        await window.electronAPI.removeBrowserView(oldPane.id)
+      }
+    }
+    
+    // Mark tab as part of the group
+    setTabs(prev => prev.map(t => 
+      t.id === tabId ? { ...t, groupId } : t
+    ))
+    
+    // Update the group
+    setTabGroups(prev => prev.map(g => 
+      g.id === groupId ? { ...g, tabIds: [...g.tabIds, tabId] } : g
+    ))
+    
+    // Create a new pane for this tab
+    const paneId = `pane-${tabId}`
+    if (window.electronAPI) {
+      await window.electronAPI.createBrowserView(paneId, tab.url)
+    }
+    
+    setPanes(prev => {
+      const newPane: Pane = {
+        id: paneId,
+        tabIds: [tabId],
+        activeTabId: tabId,
+        width: 0
+      }
+      const allPanes = [...prev, newPane]
+      const updatedWidth = 100 / allPanes.length
+      return allPanes.map(p => ({ ...p, width: updatedWidth }))
+    })
+  }
+
+  const handleDragStart = (e: React.DragEvent, tabId: string) => {
+    setDraggedTabId(tabId)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const handleDragOver = (e: React.DragEvent, groupId: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    setDropTargetGroupId(groupId)
+  }
+
+  const handleDragLeave = () => {
+    setDropTargetGroupId(null)
+  }
+
+  const handleDrop = async (e: React.DragEvent, groupId: string) => {
+    e.preventDefault()
+    if (draggedTabId && !selectedTabIds.includes(draggedTabId)) {
+      const tab = tabs.find(t => t.id === draggedTabId)
+      // Don't add if already in this group
+      if (tab && tab.groupId !== groupId) {
+        await addTabToGroup(draggedTabId, groupId)
+      }
+    }
+    setDraggedTabId(null)
+    setDropTargetGroupId(null)
+  }
+
+  const removeTabFromGroup = async (tabId: string, groupId: string) => {
+    const group = tabGroups.find(g => g.id === groupId)
+    if (!group) return
+
+    // Remove tab from group
+    const updatedTabIds = group.tabIds.filter(id => id !== tabId)
+    
+    // If group only has one tab left, ungroup it
+    if (updatedTabIds.length === 1) {
+      await ungroupPane(groupId)
+      return
+    }
+
+    // Update the group
+    setTabGroups(prev => prev.map(g => 
+      g.id === groupId ? { ...g, tabIds: updatedTabIds } : g
+    ))
+
+    // Unmark tab from group
+    setTabs(prev => prev.map(t => 
+      t.id === tabId ? { ...t, groupId: undefined } : t
+    ))
+
+    // Remove the pane for this tab
+    const paneId = `pane-${tabId}`
+    if (window.electronAPI) {
+      await window.electronAPI.removeBrowserView(paneId)
+    }
+
+    // Remove pane and recalculate widths
+    setPanes(prev => {
+      const filtered = prev.filter(p => p.id !== paneId)
+      const updatedWidth = 100 / filtered.length
+      return filtered.map(p => ({ ...p, width: updatedWidth }))
+    })
+
+    // Create a new ungrouped pane for this tab
+    const newPaneId = `pane-${Date.now()}`
+    const tab = tabs.find(t => t.id === tabId)
+    if (tab && window.electronAPI) {
+      await window.electronAPI.createBrowserView(newPaneId, tab.url)
+    }
+
+    setPanes(prev => {
+      const newPane: Pane = {
+        id: newPaneId,
+        tabIds: [tabId],
+        activeTabId: tabId,
+        width: 0
+      }
+      const allPanes = [...prev, newPane]
+      const updatedWidth = 100 / allPanes.length
+      return allPanes.map(p => ({ ...p, width: updatedWidth }))
+    })
+  }
+
+  // Default top sites (can be replaced with dynamic/popularity later)
+  const defaultTopSites = [
+    { title: 'Google', url: 'https://www.google.com' },
+    { title: 'YouTube', url: 'https://www.youtube.com' },
+    { title: 'Facebook', url: 'https://www.facebook.com' },
+    { title: 'Twitter', url: 'https://twitter.com' },
+    { title: 'Instagram', url: 'https://www.instagram.com' },
+    { title: 'Wikipedia', url: 'https://www.wikipedia.org' },
+    { title: 'Amazon', url: 'https://www.amazon.com' },
+    { title: 'Reddit', url: 'https://www.reddit.com' },
+    { title: 'LinkedIn', url: 'https://www.linkedin.com' },
+    { title: 'Netflix', url: 'https://www.netflix.com' }
+  ]
+
+  const [splashQuery, setSplashQuery] = useState('')
+
+  const openSplashLink = (url: string) => {
+    const primary = panes[0]
+    if (!primary) return
+    window.electronAPI?.navigateView(primary.id, url)
+    // update current active tab's url state
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, url } : t))
+  }
+
+  const performSplashSearch = (q?: string) => {
+    const query = (q ?? splashQuery).trim()
+    if (!query) return
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`
+    openSplashLink(searchUrl)
+    setSplashQuery('')
+  }
+
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="nav-controls">
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewGoBack(pane.id)
+          }}>←</button>
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewGoForward(pane.id)
+          }}>→</button>
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewReload(pane.id)
+          }}>⟳</button>
+        </div>
+
+        {panes.length === 1 ? (
+          <input
+            type="text"
+            className="url-bar"
+            placeholder={activeTab?.url || 'Enter URL...'}
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && navigateActivePane()}
+          />
+        ) : (
+          <input
+            type="text"
+            className="url-bar disabled"
+            placeholder={activePane ? (tabs.find(t => t.id === activePane.activeTabId)?.url || '') : 'Grouped view — use per-tab address bars'}
+            disabled
+          />
+        )}
+
+        <div className="tab-controls">
+          <button onClick={createNewTab} title="New Tab">+</button>
+        </div>
+      </div>
+      <div className="tabs-bar">
+        <button 
+          onClick={groupSelectedTabs}
+          disabled={selectedTabIds.length < 2}
+          style={{ marginRight: 8 }}
+        >
+          Group ({selectedTabIds.length})
+        </button>
+        
+        {/* Add to existing group if tabs selected and groups exist */}
+        {selectedTabIds.length > 0 && tabGroups.length > 0 && (
+          <select 
+            onChange={(e) => {
+              const groupId = e.target.value
+              if (groupId) {
+                selectedTabIds.forEach(tabId => addTabToGroup(tabId, groupId))
+                setSelectedTabIds([])
+              }
+              e.target.value = ''
+            }}
+            defaultValue=""
+            style={{ marginRight: 8, padding: '4px 8px', background: '#3a3a3a', color: '#fff', border: '1px solid #4a4a4a', borderRadius: '4px' }}
+          >
+            <option value="">Add to Group...</option>
+            {tabGroups.map(group => {
+              const groupTabs = tabs.filter(t => t.groupId === group.id)
+              const groupTitle = groupTabs.map(t => shortTitle(t.title || t.url)).join(' | ')
+              return (
+                <option key={group.id} value={group.id}>
+                  {groupTitle}
+                </option>
+              )
+            })}
+          </select>
+        )}
+        
+        <div className="tab-pills">
+          {/* Show groups first */}
+          {tabGroups.map(group => {
+            const groupTabs = tabs.filter(t => t.groupId === group.id)
+            if (groupTabs.length === 0) return null
+            
+            // Create concatenated title like [page 1|page 2|page 3]
+            const groupTitle = groupTabs.map(t => shortTitle(t.title || t.url)).join(' | ')
+            const isAnyActive = groupTabs.some(t => t.id === activeTabId)
+            const isDropTarget = dropTargetGroupId === group.id
+            
+            return (
+              <div key={group.id} className="tab-group">
+                <button 
+                  className="ungroup-btn"
+                  onClick={() => ungroupPane(group.id)}
+                  title="Ungroup"
+                >
+                  ⊟
+                </button>
+                
+                <div 
+                  className={`tab-pill grouped ${isAnyActive ? 'active' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+                  onClick={() => {
+                    // Set focus to first tab in group
+                    const firstTab = groupTabs[0]
+                    if (firstTab) {
+                      setActiveTabId(firstTab.id)
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setContextMenu({ x: e.clientX, y: e.clientY, groupId: group.id, tabId: '' })
+                  }}
+                  onDragOver={(e) => handleDragOver(e, group.id)}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, group.id)}
+                >
+                  <div style={{ cursor: 'pointer', paddingRight: 8 }}>
+                    [{groupTitle}]
+                  </div>
+                  <button
+                    className="tab-close"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      // Close all tabs in the group
+                      setTabs(prevTabs => {
+                        const newTabs = prevTabs.filter(t => !group.tabIds.includes(t.id))
+                        if (newTabs.length === 0) {
+                          // Create a new blank tab if closing all tabs
+                          const newTab = { id: `tab-${Date.now()}`, url: 'about:blank', title: 'New Tab' }
+                          return [newTab]
+                        }
+                        
+                        // Update active tab if needed
+                        if (group.tabIds.includes(activeTabId)) {
+                          setActiveTabId(newTabs[0].id)
+                        }
+                        
+                        return newTabs
+                      })
+                      
+                      // Remove the group
+                      ungroupPane(group.id)
+                    }}
+                  >×</button>
+                </div>
+              </div>
+            )
+          })}
+          
+          {/* Show ungrouped tabs */}
+          {tabs.filter(tab => !tab.groupId).map(tab => {
+            const title = shortTitle(tab.title || tab.url)
+            const isSelected = selectedTabIds.includes(tab.id)
+            const isDragging = draggedTabId === tab.id
+            return (
+              <div 
+                key={tab.id} 
+                className={`tab-pill ${tab.id === activeTabId ? 'active' : ''} ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''}`}
+                draggable={!isSelected}
+                onDragStart={(e) => handleDragStart(e, tab.id)}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleTabSelection(tab.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ marginRight: 4 }}
+                />
+                <div
+                  style={{ cursor: 'pointer', paddingRight: 8 }}
+                  onClick={() => {
+                    setActiveTabId(tab.id)
+                    const pane = panes.find(p => p.tabIds.includes(tab.id))
+                    if (pane) {
+                      setPanes(prev => prev.map(p => 
+                        p.id === pane.id ? { ...p, activeTabId: tab.id } : p
+                      ))
+                      window.electronAPI?.navigateView(pane.id, tab.url)
+                    }
+                  }}
+                >
+                  {title}
+                </div>
+                <button
+                  className="tab-close"
+                  onClick={() => {
+                    setTabs(prevTabs => {
+                      if (prevTabs.length === 1) return prevTabs
+                      const newTabs = prevTabs.filter(t => t.id !== tab.id)
+                      setPanes(prev => prev.map(p => ({ ...p, tabIds: p.tabIds.filter(id => id !== tab.id) })))
+
+                      if (activeTabId === tab.id) {
+                        const next = newTabs[Math.max(0, newTabs.length - 1)]
+                        if (next) {
+                          setActiveTabId(next.id)
+                          const nextPane = panes.find(p => p.tabIds.includes(next.id))
+                          if (nextPane) {
+                            window.electronAPI?.navigateView(nextPane.id, next.url)
+                          }
+                        }
+                      }
+
+                      return newTabs
+                    })
+                  }}
+                >×</button>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="panes-container">
+        {/* BrowserViews are rendered by Electron main process */}
+
+        {/* Splash screen overlay for about:blank tabs */}
+        {activeTab && activeTab.url === 'about:blank' && (
+          <div className="splash">
+            <div className="splash-card">
+              <h2>Search with DuckDuckGo</h2>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <input
+                  className="splash-search"
+                  placeholder="Search or enter a URL"
+                  value={splashQuery}
+                  onChange={(e) => setSplashQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') performSplashSearch() }}
+                />
+                <button onClick={() => performSplashSearch()}>Search</button>
+              </div>
+
+              <div className="quick-links">
+                <h4>Top sites</h4>
+                <div className="links-grid">
+                  {defaultTopSites.map(s => (
+                    <button key={s.url} className="quick-link" onClick={() => openSplashLink(s.url)}>{s.title}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {/* Context menu for grouped tabs */}
+      {contextMenu && (
+        <>
+          <div 
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 999
+            }}
+            onClick={() => setContextMenu(null)}
+          />
+          <div
+            style={{
+              position: 'fixed',
+              top: contextMenu.y,
+              left: contextMenu.x,
+              background: '#2a2a2a',
+              border: '1px solid #4a4a4a',
+              borderRadius: 4,
+              padding: 4,
+              zIndex: 1000,
+              minWidth: 180
+            }}
+          >
+            <div style={{ padding: '4px 8px', color: '#999', fontSize: 11, borderBottom: '1px solid #3a3a3a' }}>
+              Remove tab from group:
+            </div>
+            {tabGroups.find(g => g.id === contextMenu.groupId)?.tabIds.map(tabId => {
+              const tab = tabs.find(t => t.id === tabId)
+              if (!tab) return null
+              return (
+                <button
+                  key={tabId}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 8px',
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    fontSize: 12
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = '#3a3a3a'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                  onClick={() => {
+                    removeTabFromGroup(tabId, contextMenu.groupId)
+                    setContextMenu(null)
+                  }}
+                >
+                  {shortTitle(tab.title || tab.url)}
+                </button>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+export default App

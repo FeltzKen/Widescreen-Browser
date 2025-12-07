@@ -1,0 +1,362 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
+import './App.css'
+
+interface Tab {
+  id: string
+  url: string
+  title: string
+}
+
+interface Pane {
+  id: string
+  tabIds: string[]
+  activeTabId: string
+  width: number // percentage
+}
+
+function App() {
+  const [tabs, setTabs] = useState<Tab[]>([
+    { id: 'tab-1', url: 'https://github.com', title: 'GitHub' }
+  ])
+  // Keep a single pane only (primary view). Grouping removed for now.
+  const [panes, setPanes] = useState<Pane[]>([
+    { id: 'pane-1', tabIds: ['tab-1'], activeTabId: 'tab-1', width: 100 }
+  ])
+  const [activeTabId, setActiveTabId] = useState('tab-1')
+  const [urlInput, setUrlInput] = useState('')
+
+  // Heights (px) used to compute BrowserView top offset. Keep in sync with CSS.
+  const TOOLBAR_HEIGHT = 56 // px (toolbar)
+  const TABS_BAR_HEIGHT = 44 // px (tabs bar)
+
+  // Initialize browser views when panes change
+  useEffect(() => {
+    if (!window.electronAPI) {
+      console.error('electronAPI not available')
+      return
+    }
+
+    const initViews = async () => {
+      for (const pane of panes) {
+        const activeTab = pane.activeTabId
+        const tab = tabs.find(t => t.id === activeTab)
+        if (tab) {
+          await window.electronAPI.createBrowserView(pane.id, tab.url)
+        }
+      }
+      updatePaneBounds()
+    }
+    initViews()
+
+    return () => {
+      panes.forEach(pane => {
+        window.electronAPI?.removeBrowserView(pane.id)
+      })
+    }
+  }, [panes.length])
+
+  // Update pane bounds when layout changes
+  const updatePaneBounds = useCallback(() => {
+    if (!window.electronAPI) return
+
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const topOffset = TOOLBAR_HEIGHT + TABS_BAR_HEIGHT
+    const contentHeight = Math.max(0, windowHeight - topOffset)
+
+    let xOffset = 0
+    panesRef.current.forEach(pane => {
+      const width = Math.floor((windowWidth * pane.width) / 100)
+      const activeTab = tabsRef.current.find(t => t.id === pane.activeTabId)
+      const hide = activeTab?.url === 'about:blank'
+      const h = hide ? 0 : contentHeight
+      window.electronAPI.updateViewBounds(pane.id, {
+        x: xOffset,
+        y: topOffset,
+        width: width,
+        height: h
+      })
+      xOffset += width
+    })
+  }, [])
+
+  useEffect(() => {
+    updatePaneBounds()
+    window.addEventListener('resize', updatePaneBounds)
+    return () => window.removeEventListener('resize', updatePaneBounds)
+  }, [updatePaneBounds])
+
+  // Listen for navigation events
+  // Keep refs to panes and tabs so bounds updater can access latest state
+  const panesRef = useRef<Pane[]>(panes)
+  useEffect(() => { panesRef.current = panes }, [panes])
+  const tabsRef = useRef<Tab[]>(tabs)
+  useEffect(() => { tabsRef.current = tabs }, [tabs])
+
+  useEffect(() => {
+    if (!window.electronAPI) return
+
+    // Register navigation/title listeners once and use panesRef to read latest panes
+    const onNav = (viewId: string, url: string) => {
+      const pane = panesRef.current.find(p => p.id === viewId)
+      if (pane) {
+        console.log('[DEBUG] onViewNavigated', { viewId, url, paneActive: pane.activeTabId })
+        setTabs(prev => prev.map(tab => 
+          tab.id === pane.activeTabId ? { ...tab, url } : tab
+        ))
+      }
+    }
+
+    const onTitle = (viewId: string, title: string) => {
+      const pane = panesRef.current.find(p => p.id === viewId)
+      if (pane) {
+        setTabs(prev => prev.map(tab => 
+          tab.id === pane.activeTabId ? { ...tab, title } : tab
+        ))
+      }
+    }
+
+    window.electronAPI.onViewNavigated(onNav)
+    window.electronAPI.onViewTitleUpdated(onTitle)
+
+    return () => {
+      // remove listeners when component unmounts
+      ;(window.electronAPI as any).offViewNavigated?.()
+      ;(window.electronAPI as any).offViewTitleUpdated?.()
+    }
+  }, [])
+
+  // Update BrowserView bounds to hide the view when active tab is about:blank
+  const adjustViewVisibility = useCallback(() => {
+    if (!window.electronAPI) return
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const topOffset = TOOLBAR_HEIGHT + TABS_BAR_HEIGHT
+    const contentHeight = Math.max(0, windowHeight - topOffset)
+
+    panesRef.current.forEach(pane => {
+      const activeTab = tabsRef.current.find(t => t.id === pane.activeTabId)
+      const hide = activeTab?.url === 'about:blank'
+      const h = hide ? 0 : contentHeight
+      window.electronAPI.updateViewBounds(pane.id, {
+        x: 0,
+        y: topOffset,
+        width: Math.floor((windowWidth * pane.width) / 100),
+        height: h
+      })
+    })
+  }, [])
+
+  useEffect(() => {
+    // run whenever active tab or tabs change
+    adjustViewVisibility()
+  }, [activeTabId, tabs, adjustViewVisibility])
+
+  const createNewTab = () => {
+    const newTabId = `tab-${Date.now()}`
+    const newTab: Tab = {
+      id: newTabId,
+      url: 'about:blank',
+      title: 'New Tab'
+    }
+    // Append the new tab to the tab list and attach to the primary pane
+    setTabs(prev => [...prev, newTab])
+    setPanes(prev => prev.map((p, idx) => idx === 0 ? { ...p, tabIds: [...p.tabIds, newTabId], activeTabId: newTabId } : p))
+    // Navigate the primary pane's BrowserView to the new tab (about:blank)
+    const primary = panes[0]
+    if (primary) {
+      window.electronAPI?.navigateView(primary.id, newTab.url)
+    }
+    setActiveTabId(newTabId)
+  }
+
+  // Grouping and splitting removed — single primary pane model in use.
+
+  const navigateActivePane = () => {
+    if (!urlInput.trim() || !window.electronAPI) return
+
+    let url = urlInput.trim()
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://' + url
+    }
+
+    const activePane = panes.find(p => p.tabIds.includes(activeTabId))
+    if (activePane) {
+      console.log('[DEBUG] navigateActivePane', { activePaneId: activePane.id, activeTabId, url })
+      window.electronAPI.navigateView(activePane.id, url)
+      setTabs(prev => {
+        const res = prev.map(tab => tab.id === activeTabId ? { ...tab, url } : tab)
+        console.log('[DEBUG] tabs after navigate setTabs', res)
+        return res
+      })
+    }
+    setUrlInput('')
+  }
+
+  const activeTab = tabs.find(t => t.id === activeTabId)
+  const activePane = panes.find(p => p.tabIds.includes(activeTabId))
+
+  const shortTitle = (s?: string) => {
+    if (!s) return ''
+    const parts = s.split(' - ')
+    let t = parts[0]
+    if (t.length > 20) t = t.slice(0, 17) + '...'
+    return t
+  }
+
+  // Default top sites (can be replaced with dynamic/popularity later)
+  const defaultTopSites = [
+    { title: 'Google', url: 'https://www.google.com' },
+    { title: 'YouTube', url: 'https://www.youtube.com' },
+    { title: 'Facebook', url: 'https://www.facebook.com' },
+    { title: 'Twitter', url: 'https://twitter.com' },
+    { title: 'Instagram', url: 'https://www.instagram.com' },
+    { title: 'Wikipedia', url: 'https://www.wikipedia.org' },
+    { title: 'Amazon', url: 'https://www.amazon.com' },
+    { title: 'Reddit', url: 'https://www.reddit.com' },
+    { title: 'LinkedIn', url: 'https://www.linkedin.com' },
+    { title: 'Netflix', url: 'https://www.netflix.com' }
+  ]
+
+  const [splashQuery, setSplashQuery] = useState('')
+
+  const openSplashLink = (url: string) => {
+    const primary = panes[0]
+    if (!primary) return
+    window.electronAPI?.navigateView(primary.id, url)
+    // update current active tab's url state
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, url } : t))
+  }
+
+  const performSplashSearch = (q?: string) => {
+    const query = (q ?? splashQuery).trim()
+    if (!query) return
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`
+    openSplashLink(searchUrl)
+    setSplashQuery('')
+  }
+
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="nav-controls">
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewGoBack(pane.id)
+          }}>←</button>
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewGoForward(pane.id)
+          }}>→</button>
+          <button onClick={() => {
+            const pane = panes.find(p => p.tabIds.includes(activeTabId))
+            if (pane && window.electronAPI) window.electronAPI.viewReload(pane.id)
+          }}>⟳</button>
+        </div>
+
+        {panes.length === 1 ? (
+          <input
+            type="text"
+            className="url-bar"
+            placeholder={activeTab?.url || 'Enter URL...'}
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && navigateActivePane()}
+          />
+        ) : (
+          <input
+            type="text"
+            className="url-bar disabled"
+            placeholder={activePane ? (tabs.find(t => t.id === activePane.activeTabId)?.url || '') : 'Grouped view — use per-tab address bars'}
+            disabled
+          />
+        )}
+
+        <div className="tab-controls">
+          <button onClick={createNewTab} title="New Tab">+</button>
+        </div>
+      </div>
+      <div className="tabs-bar">
+        <div className="tab-pills">
+          {tabs.map(tab => {
+            const title = shortTitle(tab.title || tab.url)
+            return (
+              <div key={tab.id} className={`tab-pill ${tab.id === activeTabId ? 'active' : ''}`}>
+                <div
+                  style={{ cursor: 'pointer', paddingRight: 8 }}
+                  onClick={() => {
+                    setActiveTabId(tab.id)
+                    // make sure the primary pane's activeTabId updates and navigate view
+                    const primary = panes[0]
+                    setPanes(prev => prev.map(p => p.id === primary.id ? { ...p, activeTabId: tab.id } : p))
+                    window.electronAPI?.navigateView(primary.id, tab.url)
+                  }}
+                >
+                  {title}
+                </div>
+                <button
+                  className="tab-close"
+                  onClick={() => {
+                    setTabs(prevTabs => {
+                      // don't close the last remaining tab
+                      if (prevTabs.length === 1) return prevTabs
+                      const newTabs = prevTabs.filter(t => t.id !== tab.id)
+                      // update panes to remove this tab id
+                      setPanes(prev => prev.map(p => ({ ...p, tabIds: p.tabIds.filter(id => id !== tab.id) })))
+
+                      // if the closed tab was active, activate the last remaining tab
+                      if (activeTabId === tab.id) {
+                        const next = newTabs[Math.max(0, newTabs.length - 1)]
+                        if (next) {
+                          setActiveTabId(next.id)
+                          const primary = panes[0]
+                          window.electronAPI?.navigateView(primary.id, next.url)
+                        }
+                      }
+
+                      return newTabs
+                    })
+                  }}
+                >×</button>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="panes-container">
+        {/* BrowserViews are rendered by Electron main process */}
+
+        {/* Splash screen overlay for about:blank tabs */}
+        {activeTab && activeTab.url === 'about:blank' && (
+          <div className="splash">
+            <div className="splash-card">
+              <h2>Search with DuckDuckGo</h2>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <input
+                  className="splash-search"
+                  placeholder="Search or enter a URL"
+                  value={splashQuery}
+                  onChange={(e) => setSplashQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') performSplashSearch() }}
+                />
+                <button onClick={() => performSplashSearch()}>Search</button>
+              </div>
+
+              <div className="quick-links">
+                <h4>Top sites</h4>
+                <div className="links-grid">
+                  {defaultTopSites.map(s => (
+                    <button key={s.url} className="quick-link" onClick={() => openSplashLink(s.url)}>{s.title}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default App

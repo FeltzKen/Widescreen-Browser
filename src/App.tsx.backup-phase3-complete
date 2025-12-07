@@ -1,0 +1,955 @@
+import { useState, useEffect } from 'react'
+import './App.css'
+
+interface Tab {
+  id: string
+  url: string
+  title: string
+  viewId: string
+  groupId: string | null
+}
+
+interface Group {
+  id: string
+  name: string
+  tabIds: string[]
+  collapsed: boolean
+}
+
+function App() {
+  const [tabs, setTabs] = useState<Tab[]>([
+    {
+      id: 'tab-1',
+      url: 'about:blank',
+      title: 'New Tab',
+      viewId: 'view-1',
+      groupId: null
+    }
+  ])
+  const [groups, setGroups] = useState<Group[]>([])
+  const [activeTabId, setActiveTabId] = useState('tab-1')
+  const [urlInput, setUrlInput] = useState('')
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null)
+  const [draggedGroupId, setDraggedGroupId] = useState<string | null>(null)
+  const [dropTargetTabId, setDropTargetTabId] = useState<string | null>(null)
+  const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null)
+  const [openGroupMenuId, setOpenGroupMenuId] = useState<string | null>(null)
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null)
+  const [editingGroupName, setEditingGroupName] = useState<string>('')
+  
+  // Store custom split widths as percentages for each group
+  const [groupSplitWidths, setGroupSplitWidths] = useState<{ [groupId: string]: number[] }>({})
+  
+  // Resize handle state
+  const [resizingGroupId, setResizingGroupId] = useState<string | null>(null)
+  const [resizingHandleIndex, setResizingHandleIndex] = useState<number | null>(null)
+  const [resizeStartX, setResizeStartX] = useState<number>(0)
+
+  const activeTab = tabs.find(t => t.id === activeTabId)
+
+  // Initialize browser views for all tabs
+  useEffect(() => {
+    if (!window.electronAPI) {
+      console.error('electronAPI not available')
+      return
+    }
+
+    const init = async () => {
+      // Create view for initial tab
+      for (const tab of tabs) {
+        await window.electronAPI.createBrowserView(tab.viewId, tab.url)
+      }
+      updateAllViews()
+    }
+
+    init()
+
+    // Listen for title updates
+    window.electronAPI.onViewTitleUpdated((viewId: string, title: string) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, title } : t
+        )
+      )
+    })
+
+    // Listen for navigation updates (to update URL)
+    window.electronAPI.onViewNavigated((viewId: string, url: string) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, url } : t
+        )
+      )
+    })
+
+    // Handle window resize
+    window.addEventListener('resize', updateAllViews)
+    return () => {
+      window.removeEventListener('resize', updateAllViews)
+      window.electronAPI?.offViewTitleUpdated()
+      window.electronAPI?.offViewNavigated()
+      // Clean up all views
+      tabs.forEach(tab => {
+        window.electronAPI?.removeBrowserView(tab.viewId)
+      })
+    }
+  }, [])
+
+  // Update all views whenever tabs or active tab changes
+  useEffect(() => {
+    updateAllViews()
+  }, [tabs, activeTabId, groups, openGroupMenuId])
+
+  const updateAllViews = () => {
+    if (!window.electronAPI) return
+
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const toolbarHeight = 100 // Increased for tab bar
+
+    const activeTab = tabs.find(t => t.id === activeTabId)
+    if (!activeTab) return
+
+    // If a group menu is open, hide all views to prevent z-index issues
+    if (openGroupMenuId) {
+      tabs.forEach(tab => {
+        window.electronAPI.updateViewBounds(tab.viewId, {
+          x: 0,
+          y: toolbarHeight,
+          width: windowWidth,
+          height: 0
+        })
+      })
+      return
+    }
+
+    // Check if active tab is in a group
+    const activeGroup = activeTab.groupId 
+      ? groups.find(g => g.id === activeTab.groupId)
+      : null
+
+    tabs.forEach(tab => {
+      const isActive = tab.id === activeTabId
+      const shouldHideSplash = tab.url === 'about:blank'
+      
+      // If active tab is in a group, show all tabs in that group split (regardless of collapsed state)
+      if (activeGroup && tab.groupId === activeGroup.id) {
+        const tabsInGroup = tabs.filter(t => t.groupId === activeGroup.id)
+        const numTabs = tabsInGroup.length
+        const tabIndex = activeGroup.tabIds.indexOf(tab.id)
+        
+        // Use custom widths if available, otherwise equal split
+        const customWidths = groupSplitWidths[activeGroup.id]
+        let xPos = 0
+        let splitWidth = 0
+        
+        if (customWidths && customWidths.length === numTabs) {
+          // Calculate position and width from percentages
+          for (let i = 0; i < tabIndex; i++) {
+            xPos += windowWidth * (customWidths[i] / 100)
+          }
+          splitWidth = windowWidth * (customWidths[tabIndex] / 100)
+        } else {
+          // Equal split
+          splitWidth = Math.floor(windowWidth / numTabs)
+          xPos = tabIndex * splitWidth
+        }
+
+        window.electronAPI.updateViewBounds(tab.viewId, {
+          x: Math.round(xPos),
+          y: toolbarHeight,
+          width: Math.round(splitWidth),
+          height: shouldHideSplash ? 0 : windowHeight - toolbarHeight
+        })
+      }
+      // Otherwise show only the active tab full width
+      else if (isActive) {
+        window.electronAPI.updateViewBounds(tab.viewId, {
+          x: 0,
+          y: toolbarHeight,
+          width: windowWidth,
+          height: shouldHideSplash ? 0 : windowHeight - toolbarHeight
+        })
+      }
+      // Hide all other tabs
+      else {
+        window.electronAPI.updateViewBounds(tab.viewId, {
+          x: 0,
+          y: toolbarHeight,
+          width: windowWidth,
+          height: 0
+        })
+      }
+    })
+  }
+
+  const navigate = (urlToNavigate?: string) => {
+    if (!window.electronAPI || !activeTab) return
+
+    const inputUrl = urlToNavigate || urlInput.trim()
+    if (!inputUrl) return
+
+    let finalUrl = inputUrl
+    
+    // Check if it's a URL or search query
+    if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.includes('.')) {
+      // It's a search query - use DuckDuckGo
+      finalUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(finalUrl)
+    } else if (!/^https?:\/\//i.test(finalUrl)) {
+      // It's a domain without protocol
+      finalUrl = 'https://' + finalUrl
+    }
+
+    window.electronAPI.navigateView(activeTab.viewId, finalUrl)
+    
+    // Update tab URL
+    setTabs(tabs.map(t => 
+      t.id === activeTabId ? { ...t, url: finalUrl } : t
+    ))
+    setUrlInput('')
+  }
+
+  const switchTab = (tabId: string) => {
+    setActiveTabId(tabId)
+  }
+
+  const addNewTab = async () => {
+    const newTabId = `tab-${Date.now()}`
+    const newViewId = `view-${Date.now()}`
+    const newTab: Tab = {
+      id: newTabId,
+      url: 'about:blank',
+      title: 'New Tab',
+      viewId: newViewId,
+      groupId: null
+    }
+
+    // Create the new tab first
+    const newTabs = [...tabs, newTab]
+    setTabs(newTabs)
+    setActiveTabId(newTabId)
+
+    // Then create the browser view
+    if (window.electronAPI) {
+      await window.electronAPI.createBrowserView(newViewId, 'about:blank')
+      // Immediately update bounds to show splash
+      updateAllViews()
+    }
+  }
+
+  const closeTab = (tabId: string) => {
+    // Prevent closing the last tab
+    if (tabs.length === 1) return
+
+    const tab = tabs.find(t => t.id === tabId)
+    if (tab && window.electronAPI) {
+      window.electronAPI.removeBrowserView(tab.viewId)
+    }
+
+    const newTabs = tabs.filter(t => t.id !== tabId)
+    setTabs(newTabs)
+
+    // If closing active tab, switch to the previous tab
+    if (tabId === activeTabId) {
+      const currentIndex = tabs.findIndex(t => t.id === tabId)
+      const newActiveIndex = Math.max(0, currentIndex - 1)
+      setActiveTabId(newTabs[newActiveIndex].id)
+    }
+  }
+
+  const goBack = () => activeTab && window.electronAPI?.viewGoBack(activeTab.viewId)
+  const goForward = () => activeTab && window.electronAPI?.viewGoForward(activeTab.viewId)
+  const reload = () => activeTab && window.electronAPI?.viewReload(activeTab.viewId)
+
+  // Reorder tabs within a group
+  const reorderTabsInGroup = (groupId: string, fromIndex: number, toIndex: number) => {
+    setGroups(groups.map(g => {
+      if (g.id === groupId) {
+        const newTabIds = [...g.tabIds]
+        const [movedTab] = newTabIds.splice(fromIndex, 1)
+        newTabIds.splice(toIndex, 0, movedTab)
+        return { ...g, tabIds: newTabIds }
+      }
+      return g
+    }))
+  }
+
+  const renameGroup = (groupId: string, newName: string) => {
+    if (newName.trim()) {
+      setGroups(groups.map(g => 
+        g.id === groupId ? { ...g, name: newName.trim() } : g
+      ))
+    }
+    setEditingGroupId(null)
+    setEditingGroupName('')
+  }
+
+  const startEditingGroup = (groupId: string, currentName: string) => {
+    setEditingGroupId(groupId)
+    setEditingGroupName(currentName)
+  }
+
+  // Drag and drop handlers
+  const handleDragStart = (tabId: string) => {
+    setDraggedTabId(tabId)
+    setDraggedGroupId(null)
+  }
+
+  const handleGroupDragStart = (groupId: string) => {
+    setDraggedGroupId(groupId)
+    setDraggedTabId(null)
+  }
+
+  const handleDragOver = (e: React.DragEvent, targetTabId: string) => {
+    e.preventDefault()
+    setDropTargetTabId(targetTabId)
+    setDropTargetGroupId(null)
+  }
+
+  const handleGroupDragOver = (e: React.DragEvent, targetGroupId: string) => {
+    e.preventDefault()
+    setDropTargetGroupId(targetGroupId)
+    setDropTargetTabId(null)
+  }
+
+  const handleDragLeave = () => {
+    setDropTargetTabId(null)
+    setDropTargetGroupId(null)
+  }
+
+  const handleDrop = (targetTabId: string) => {
+    if (draggedTabId && draggedTabId !== targetTabId) {
+      handleTabDrop(targetTabId)
+    } else if (draggedGroupId) {
+      handleGroupDropOnTab(targetTabId)
+    }
+    
+    setDraggedTabId(null)
+    setDraggedGroupId(null)
+    setDropTargetTabId(null)
+    setDropTargetGroupId(null)
+  }
+
+  const handleGroupDrop = (targetGroupId: string) => {
+    if (draggedTabId) {
+      handleTabDropOnGroup(targetGroupId)
+    } else if (draggedGroupId && draggedGroupId !== targetGroupId) {
+      handleGroupMerge(targetGroupId)
+    }
+    
+    setDraggedTabId(null)
+    setDraggedGroupId(null)
+    setDropTargetTabId(null)
+    setDropTargetGroupId(null)
+  }
+
+  const handleTabDrop = (targetTabId: string) => {
+    if (!draggedTabId) return
+
+    const draggedTab = tabs.find(t => t.id === draggedTabId)
+    const targetTab = tabs.find(t => t.id === targetTabId)
+
+    if (!draggedTab || !targetTab) return
+
+    // If both tabs are ungrouped, create a new group
+    if (draggedTab.groupId === null && targetTab.groupId === null) {
+      const newGroupId = `group-${Date.now()}`
+      const newGroup: Group = {
+        id: newGroupId,
+        name: 'Group',
+        tabIds: [targetTabId, draggedTabId],
+        collapsed: true
+      }
+
+      setGroups([...groups, newGroup])
+      setTabs(tabs.map(t => {
+        if (t.id === targetTabId || t.id === draggedTabId) {
+          return { ...t, groupId: newGroupId }
+        }
+        return t
+      }))
+    }
+    // If dragged tab is in a group and target is ungrouped, create new group
+    else if (draggedTab.groupId && targetTab.groupId === null) {
+      // Remove from old group first
+      const oldGroup = groups.find(g => g.id === draggedTab.groupId)
+      if (oldGroup) {
+        const updatedTabIds = oldGroup.tabIds.filter(id => id !== draggedTabId)
+        
+        // Delete old group if only one tab left
+        if (updatedTabIds.length === 1) {
+          setGroups(groups.filter(g => g.id !== draggedTab.groupId))
+          setTabs(tabs.map(t => {
+            if (t.id === updatedTabIds[0]) {
+              return { ...t, groupId: null }
+            }
+            return t
+          }))
+        } else {
+          setGroups(groups.map(g => {
+            if (g.id === draggedTab.groupId) {
+              return { ...g, tabIds: updatedTabIds }
+            }
+            return g
+          }))
+        }
+      }
+      
+      // Create new group with target and dragged tab
+      const newGroupId = `group-${Date.now()}`
+      const newGroup: Group = {
+        id: newGroupId,
+        name: 'Group',
+        tabIds: [targetTabId, draggedTabId],
+        collapsed: true
+      }
+
+      setGroups(prevGroups => [...prevGroups, newGroup])
+      setTabs(tabs.map(t => {
+        if (t.id === targetTabId || t.id === draggedTabId) {
+          return { ...t, groupId: newGroupId }
+        }
+        return t
+      }))
+    }
+    // If target is in a group and dragged is not, add to group
+    else if (targetTab.groupId && draggedTab.groupId === null) {
+      setGroups(groups.map(g => {
+        if (g.id === targetTab.groupId) {
+          return { ...g, tabIds: [...g.tabIds, draggedTabId] }
+        }
+        return g
+      }))
+      setTabs(tabs.map(t => {
+        if (t.id === draggedTabId) {
+          return { ...t, groupId: targetTab.groupId }
+        }
+        return t
+      }))
+    }
+    // If both tabs are in different groups, merge the groups
+    else if (draggedTab.groupId && targetTab.groupId && draggedTab.groupId !== targetTab.groupId) {
+      const draggedGroup = groups.find(g => g.id === draggedTab.groupId)
+      const targetGroup = groups.find(g => g.id === targetTab.groupId)
+      
+      if (draggedGroup && targetGroup) {
+        // Merge dragged group into target group
+        setGroups(groups.filter(g => g.id !== draggedTab.groupId).map(g => {
+          if (g.id === targetTab.groupId) {
+            return { ...g, tabIds: [...g.tabIds, ...draggedGroup.tabIds] }
+          }
+          return g
+        }))
+        setTabs(tabs.map(t => {
+          if (t.groupId === draggedTab.groupId) {
+            return { ...t, groupId: targetTab.groupId }
+          }
+          return t
+        }))
+      }
+    }
+  }
+
+  const handleTabDropOnGroup = (targetGroupId: string) => {
+    if (!draggedTabId) return
+
+    const draggedTab = tabs.find(t => t.id === draggedTabId)
+    const targetGroup = groups.find(g => g.id === targetGroupId)
+
+    if (!draggedTab || !targetGroup) return
+
+    // Remove from old group if in one
+    if (draggedTab.groupId) {
+      const oldGroup = groups.find(g => g.id === draggedTab.groupId)
+      if (oldGroup) {
+        const updatedTabIds = oldGroup.tabIds.filter(id => id !== draggedTabId)
+        
+        // Delete old group if only one tab left
+        if (updatedTabIds.length === 1) {
+          setGroups(groups.filter(g => g.id !== draggedTab.groupId))
+          setTabs(tabs.map(t => {
+            if (t.id === updatedTabIds[0]) {
+              return { ...t, groupId: null }
+            }
+            return t
+          }))
+        } else {
+          setGroups(groups.map(g => {
+            if (g.id === draggedTab.groupId) {
+              return { ...g, tabIds: updatedTabIds }
+            }
+            return g
+          }))
+        }
+      }
+    }
+
+    // Add to target group
+    setGroups(groups.map(g => {
+      if (g.id === targetGroupId) {
+        return { ...g, tabIds: [...g.tabIds, draggedTabId] }
+      }
+      return g
+    }))
+    setTabs(tabs.map(t => {
+      if (t.id === draggedTabId) {
+        return { ...t, groupId: targetGroupId }
+      }
+      return t
+    }))
+  }
+
+  const handleGroupDropOnTab = (targetTabId: string) => {
+    if (!draggedGroupId) return
+
+    const draggedGroup = groups.find(g => g.id === draggedGroupId)
+    const targetTab = tabs.find(t => t.id === targetTabId)
+
+    if (!draggedGroup || !targetTab) return
+
+    // If target is ungrouped, add it to the dragged group
+    if (targetTab.groupId === null) {
+      setGroups(groups.map(g => {
+        if (g.id === draggedGroupId) {
+          return { ...g, tabIds: [...g.tabIds, targetTabId] }
+        }
+        return g
+      }))
+      setTabs(tabs.map(t => {
+        if (t.id === targetTabId) {
+          return { ...t, groupId: draggedGroupId }
+        }
+        return t
+      }))
+    }
+    // If target is in a different group, merge the groups
+    else if (targetTab.groupId !== draggedGroupId) {
+      handleGroupMerge(targetTab.groupId)
+    }
+  }
+
+  const handleGroupMerge = (targetGroupId: string) => {
+    if (!draggedGroupId || draggedGroupId === targetGroupId) return
+
+    const draggedGroup = groups.find(g => g.id === draggedGroupId)
+    const targetGroup = groups.find(g => g.id === targetGroupId)
+
+    if (!draggedGroup || !targetGroup) return
+
+    // Merge dragged group tabs into target group
+    setGroups(groups.filter(g => g.id !== draggedGroupId).map(g => {
+      if (g.id === targetGroupId) {
+        return { ...g, tabIds: [...g.tabIds, ...draggedGroup.tabIds] }
+      }
+      return g
+    }))
+
+    // Update all tabs from dragged group to point to target group
+    setTabs(tabs.map(t => {
+      if (t.groupId === draggedGroupId) {
+        return { ...t, groupId: targetGroupId }
+      }
+      return t
+    }))
+  }
+
+  const handleUngroupTab = (tabId: string) => {
+    const tab = tabs.find(t => t.id === tabId)
+    if (!tab || !tab.groupId) return
+
+    const group = groups.find(g => g.id === tab.groupId)
+    if (!group) return
+
+    // Remove tab from group
+    const updatedTabIds = group.tabIds.filter(id => id !== tabId)
+
+    // If group has only one tab left, delete the group
+    if (updatedTabIds.length === 1) {
+      const remainingTabId = updatedTabIds[0]
+      setTabs(tabs.map(t => {
+        if (t.id === tabId || t.id === remainingTabId) {
+          return { ...t, groupId: null }
+        }
+        return t
+      }))
+      setGroups(groups.filter(g => g.id !== tab.groupId))
+    } else {
+      // Update group with remaining tabs
+      setGroups(groups.map(g => {
+        if (g.id === tab.groupId) {
+          return { ...g, tabIds: updatedTabIds }
+        }
+        return g
+      }))
+      setTabs(tabs.map(t => {
+        if (t.id === tabId) {
+          return { ...t, groupId: null }
+        }
+        return t
+      }))
+    }
+  }
+
+  const toggleGroupCollapse = (groupId: string) => {
+    setGroups(groups.map(g => {
+      if (g.id === groupId) {
+        const newCollapsed = !g.collapsed
+        // Track if menu is opening or closing
+        setOpenGroupMenuId(newCollapsed ? null : groupId)
+        return { ...g, collapsed: newCollapsed }
+      }
+      return g
+    }))
+  }
+
+  // Close group menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (openGroupMenuId) {
+        setGroups(groups.map(g => 
+          g.id === openGroupMenuId ? { ...g, collapsed: true } : g
+        ))
+        setOpenGroupMenuId(null)
+      }
+    }
+
+    if (openGroupMenuId) {
+      // Add slight delay to prevent immediate closure on toggle click
+      const timer = setTimeout(() => {
+        document.addEventListener('click', handleClickOutside)
+      }, 100)
+      
+      return () => {
+        clearTimeout(timer)
+        document.removeEventListener('click', handleClickOutside)
+      }
+    }
+  }, [openGroupMenuId, groups])
+
+  // Resize handle handlers
+  const handleResizeStart = (groupId: string, handleIndex: number, e: React.MouseEvent) => {
+    e.preventDefault()
+    setResizingGroupId(groupId)
+    setResizingHandleIndex(handleIndex)
+    setResizeStartX(e.clientX)
+  }
+
+  useEffect(() => {
+    if (resizingGroupId === null || resizingHandleIndex === null) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const group = groups.find(g => g.id === resizingGroupId)
+      if (!group) return
+
+      const numTabs = group.tabIds.length
+      const windowWidth = window.innerWidth
+      const deltaX = e.clientX - resizeStartX
+
+      // Get current widths or initialize equal split
+      const currentWidths = groupSplitWidths[resizingGroupId] || 
+        Array(numTabs).fill(100 / numTabs)
+
+      // Calculate new widths
+      const newWidths = [...currentWidths]
+      const leftIndex = resizingHandleIndex
+      const rightIndex = resizingHandleIndex + 1
+
+      const deltaPercent = (deltaX / windowWidth) * 100
+
+      // Minimum width: 15% of window
+      const minPercent = 15
+      const newLeftWidth = Math.max(minPercent, currentWidths[leftIndex] + deltaPercent)
+      const newRightWidth = Math.max(minPercent, currentWidths[rightIndex] - deltaPercent)
+
+      // Only apply if both sides are above minimum
+      if (newLeftWidth >= minPercent && newRightWidth >= minPercent) {
+        newWidths[leftIndex] = newLeftWidth
+        newWidths[rightIndex] = newRightWidth
+
+        setGroupSplitWidths({
+          ...groupSplitWidths,
+          [resizingGroupId]: newWidths
+        })
+        setResizeStartX(e.clientX)
+      }
+    }
+
+    const handleMouseUp = () => {
+      setResizingGroupId(null)
+      setResizingHandleIndex(null)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [resizingGroupId, resizingHandleIndex, resizeStartX, groups, groupSplitWidths])
+
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="tab-bar">
+          {/* Render ungrouped tabs */}
+          {tabs.filter(tab => tab.groupId === null).map(tab => (
+            <div 
+              key={tab.id} 
+              className={`tab ${tab.id === activeTabId ? 'active' : ''} ${dropTargetTabId === tab.id ? 'drop-target' : ''}`}
+              onClick={() => switchTab(tab.id)}
+              draggable
+              onDragStart={() => handleDragStart(tab.id)}
+              onDragOver={(e) => handleDragOver(e, tab.id)}
+              onDragLeave={handleDragLeave}
+              onDrop={() => handleDrop(tab.id)}
+            >
+              <span className="tab-title">{tab.title}</span>
+              <button 
+                className="close-tab" 
+                onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+
+          {/* Render groups */}
+          {groups.map(group => (
+            <div key={group.id} className="group-container">
+              <div 
+                className={`group-header ${group.tabIds.includes(activeTabId) ? 'active' : ''} ${dropTargetGroupId === group.id ? 'drop-target' : ''}`}
+                onClick={() => {
+                  const firstTabInGroup = group.tabIds[0]
+                  switchTab(firstTabInGroup)
+                }}
+                draggable
+                onDragStart={() => handleGroupDragStart(group.id)}
+                onDragOver={(e) => handleGroupDragOver(e, group.id)}
+                onDragLeave={handleDragLeave}
+                onDrop={() => handleGroupDrop(group.id)}
+              >
+                {editingGroupId === group.id ? (
+                  <input
+                    type="text"
+                    className="group-name-input"
+                    value={editingGroupName}
+                    onChange={(e) => setEditingGroupName(e.target.value)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') renameGroup(group.id, editingGroupName)
+                      if (e.key === 'Escape') { setEditingGroupId(null); setEditingGroupName('') }
+                    }}
+                    onBlur={() => renameGroup(group.id, editingGroupName)}
+                    onClick={(e) => e.stopPropagation()}
+                    autoFocus
+                  />
+                ) : (
+                  <span 
+                    className="group-name"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      startEditingGroup(group.id, group.name)
+                    }}
+                    title="Double-click to rename"
+                  >
+                    {group.name}
+                  </span>
+                )}
+                <button 
+                  className="collapse-button"
+                  onClick={(e) => { e.stopPropagation(); toggleGroupCollapse(group.id); }}
+                >
+                  {group.collapsed ? '▶' : '▼'}
+                </button>
+              </div>
+              
+              {!group.collapsed && (
+                <div 
+                  className="group-tabs"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {group.tabIds.map((tabId, index) => {
+                    const tab = tabs.find(t => t.id === tabId)
+                    if (!tab) return null
+                    return (
+                      <div 
+                        key={tab.id}
+                        className={`group-tab ${tab.id === activeTabId ? 'active' : ''} ${dropTargetTabId === tab.id ? 'drop-target' : ''}`}
+                        onClick={() => switchTab(tab.id)}
+                        draggable
+                        onDragStart={(e) => {
+                          e.stopPropagation()
+                          setDraggedTabId(tab.id)
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          setDropTargetTabId(tab.id)
+                        }}
+                        onDragLeave={() => setDropTargetTabId(null)}
+                        onDrop={(e) => {
+                          e.stopPropagation()
+                          if (draggedTabId && draggedTabId !== tab.id) {
+                            const draggedTab = tabs.find(t => t.id === draggedTabId)
+                            if (draggedTab?.groupId === group.id) {
+                              // Reorder within same group
+                              const fromIndex = group.tabIds.indexOf(draggedTabId)
+                              const toIndex = index
+                              reorderTabsInGroup(group.id, fromIndex, toIndex)
+                            } else {
+                              // Moving from another group or ungrouped - handleTabDropOnGroup handles both
+                              handleTabDropOnGroup(group.id)
+                            }
+                          }
+                          setDraggedTabId(null)
+                          setDropTargetTabId(null)
+                        }}
+                      >
+                        <span className="tab-title">{tab.title}</span>
+                        <button 
+                          className="ungroup-button"
+                          onClick={(e) => { e.stopPropagation(); handleUngroupTab(tab.id); }}
+                          title="Remove from group"
+                        >
+                          ⤴
+                        </button>
+                        <button 
+                          className="close-tab" 
+                          onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button className="new-tab-button" onClick={addNewTab}>+</button>
+        </div>
+
+        <div className="nav-bar">
+          <div className="nav-controls">
+            <button onClick={goBack}>←</button>
+            <button onClick={goForward}>→</button>
+            <button onClick={reload}>⟳</button>
+          </div>
+
+          <input
+            type="text"
+            className="url-input"
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && navigate()}
+            placeholder="Enter URL or search..."
+          />
+
+          <button onClick={() => navigate()}>Go</button>
+        </div>
+      </div>
+
+      {/* Resize handles for active group */}
+      {(() => {
+        const activeTab = tabs.find(t => t.id === activeTabId)
+        if (!activeTab?.groupId) return null
+        
+        const activeGroup = groups.find(g => g.id === activeTab.groupId)
+        if (!activeGroup) return null
+
+        const numTabs = activeGroup.tabIds.length
+        if (numTabs < 2) return null
+
+        const windowWidth = window.innerWidth
+        const customWidths = groupSplitWidths[activeGroup.id] || 
+          Array(numTabs).fill(100 / numTabs)
+        
+        const handles = []
+        let cumulativeX = 0
+
+        for (let i = 0; i < numTabs - 1; i++) {
+          cumulativeX += windowWidth * (customWidths[i] / 100)
+          handles.push(
+            <div
+              key={`handle-${i}`}
+              className="resize-handle"
+              style={{
+                left: `${cumulativeX}px`,
+                top: '100px',
+                height: `calc(100vh - 100px)`
+              }}
+              onMouseDown={(e) => handleResizeStart(activeGroup.id, i, e)}
+            />
+          )
+        }
+
+        return handles
+      })()}
+
+      {activeTab?.url === 'about:blank' && (
+        <div className="splash-screen">
+          <div className="splash-content">
+            <h1>WideScreen Split Browser</h1>
+            
+            <div className="search-container">
+              <input
+                type="text"
+                className="search-input"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && navigate()}
+                placeholder="Search DuckDuckGo or enter URL..."
+                autoFocus
+              />
+              <button className="search-button" onClick={() => navigate()}>Search</button>
+            </div>
+
+            <p className="quick-start-label">Quick Start</p>
+            <div className="quick-links">
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('github.com');
+              }}>
+                GitHub
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('youtube.com');
+              }}>
+                YouTube
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('reddit.com');
+              }}>
+                Reddit
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('twitter.com');
+              }}>
+                Twitter
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('netflix.com');
+              }}>
+                Netflix
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('amazon.com');
+              }}>
+                Amazon
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default App

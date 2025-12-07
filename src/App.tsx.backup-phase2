@@ -1,0 +1,281 @@
+import { useState, useEffect } from 'react'
+import './App.css'
+
+interface Tab {
+  id: string
+  url: string
+  title: string
+  viewId: string
+}
+
+function App() {
+  const [tabs, setTabs] = useState<Tab[]>([
+    {
+      id: 'tab-1',
+      url: 'about:blank',
+      title: 'New Tab',
+      viewId: 'view-1'
+    }
+  ])
+  const [activeTabId, setActiveTabId] = useState('tab-1')
+  const [urlInput, setUrlInput] = useState('')
+
+  const activeTab = tabs.find(t => t.id === activeTabId)
+
+  // Initialize browser views for all tabs
+  useEffect(() => {
+    if (!window.electronAPI) {
+      console.error('electronAPI not available')
+      return
+    }
+
+    const init = async () => {
+      // Create view for initial tab
+      for (const tab of tabs) {
+        await window.electronAPI.createBrowserView(tab.viewId, tab.url)
+      }
+      updateAllViews()
+    }
+
+    init()
+
+    // Listen for title updates
+    window.electronAPI.onViewTitleUpdated((viewId: string, title: string) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, title } : t
+        )
+      )
+    })
+
+    // Listen for navigation updates (to update URL)
+    window.electronAPI.onViewNavigated((viewId: string, url: string) => {
+      setTabs(currentTabs => 
+        currentTabs.map(t => 
+          t.viewId === viewId ? { ...t, url } : t
+        )
+      )
+    })
+
+    // Handle window resize
+    window.addEventListener('resize', updateAllViews)
+    return () => {
+      window.removeEventListener('resize', updateAllViews)
+      window.electronAPI?.offViewTitleUpdated()
+      window.electronAPI?.offViewNavigated()
+      // Clean up all views
+      tabs.forEach(tab => {
+        window.electronAPI?.removeBrowserView(tab.viewId)
+      })
+    }
+  }, [])
+
+  // Update all views whenever tabs or active tab changes
+  useEffect(() => {
+    updateAllViews()
+  }, [tabs, activeTabId])
+
+  const updateAllViews = () => {
+    if (!window.electronAPI) return
+
+    const windowWidth = window.innerWidth
+    const windowHeight = window.innerHeight
+    const toolbarHeight = 100 // Increased for tab bar
+
+    tabs.forEach(tab => {
+      const isActive = tab.id === activeTabId
+      const shouldHide = !isActive || tab.url === 'about:blank'
+
+      window.electronAPI.updateViewBounds(tab.viewId, {
+        x: 0,
+        y: toolbarHeight,
+        width: windowWidth,
+        height: shouldHide ? 0 : windowHeight - toolbarHeight
+      })
+    })
+  }
+
+  const navigate = (urlToNavigate?: string) => {
+    if (!window.electronAPI || !activeTab) return
+
+    const inputUrl = urlToNavigate || urlInput.trim()
+    if (!inputUrl) return
+
+    let finalUrl = inputUrl
+    
+    // Check if it's a URL or search query
+    if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.includes('.')) {
+      // It's a search query - use DuckDuckGo
+      finalUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(finalUrl)
+    } else if (!/^https?:\/\//i.test(finalUrl)) {
+      // It's a domain without protocol
+      finalUrl = 'https://' + finalUrl
+    }
+
+    window.electronAPI.navigateView(activeTab.viewId, finalUrl)
+    
+    // Update tab URL
+    setTabs(tabs.map(t => 
+      t.id === activeTabId ? { ...t, url: finalUrl } : t
+    ))
+    setUrlInput('')
+  }
+
+  const switchTab = (tabId: string) => {
+    setActiveTabId(tabId)
+  }
+
+  const addNewTab = async () => {
+    const newTabId = `tab-${Date.now()}`
+    const newViewId = `view-${Date.now()}`
+    const newTab: Tab = {
+      id: newTabId,
+      url: 'about:blank',
+      title: 'New Tab',
+      viewId: newViewId
+    }
+
+    // Create the new tab first
+    const newTabs = [...tabs, newTab]
+    setTabs(newTabs)
+    setActiveTabId(newTabId)
+
+    // Then create the browser view
+    if (window.electronAPI) {
+      await window.electronAPI.createBrowserView(newViewId, 'about:blank')
+      // Immediately update bounds to show splash
+      updateAllViews()
+    }
+  }
+
+  const closeTab = (tabId: string) => {
+    // Prevent closing the last tab
+    if (tabs.length === 1) return
+
+    const tab = tabs.find(t => t.id === tabId)
+    if (tab && window.electronAPI) {
+      window.electronAPI.removeBrowserView(tab.viewId)
+    }
+
+    const newTabs = tabs.filter(t => t.id !== tabId)
+    setTabs(newTabs)
+
+    // If closing active tab, switch to the previous tab
+    if (tabId === activeTabId) {
+      const currentIndex = tabs.findIndex(t => t.id === tabId)
+      const newActiveIndex = Math.max(0, currentIndex - 1)
+      setActiveTabId(newTabs[newActiveIndex].id)
+    }
+  }
+
+  const goBack = () => activeTab && window.electronAPI?.viewGoBack(activeTab.viewId)
+  const goForward = () => activeTab && window.electronAPI?.viewGoForward(activeTab.viewId)
+  const reload = () => activeTab && window.electronAPI?.viewReload(activeTab.viewId)
+
+  return (
+    <div className="app">
+      <div className="toolbar">
+        <div className="tab-bar">
+          {tabs.map(tab => (
+            <div 
+              key={tab.id} 
+              className={`tab ${tab.id === activeTabId ? 'active' : ''}`}
+              onClick={() => switchTab(tab.id)}
+            >
+              <span className="tab-title">{tab.title}</span>
+              <button 
+                className="close-tab" 
+                onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button className="new-tab-button" onClick={addNewTab}>+</button>
+        </div>
+
+        <div className="nav-bar">
+          <div className="nav-controls">
+            <button onClick={goBack}>←</button>
+            <button onClick={goForward}>→</button>
+            <button onClick={reload}>⟳</button>
+          </div>
+
+          <input
+            type="text"
+            className="url-input"
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && navigate()}
+            placeholder="Enter URL or search..."
+          />
+
+          <button onClick={() => navigate()}>Go</button>
+        </div>
+      </div>
+
+      {activeTab?.url === 'about:blank' && (
+        <div className="splash-screen">
+          <div className="splash-content">
+            <h1>WideScreen Split Browser</h1>
+            
+            <div className="search-container">
+              <input
+                type="text"
+                className="search-input"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && navigate()}
+                placeholder="Search DuckDuckGo or enter URL..."
+                autoFocus
+              />
+              <button className="search-button" onClick={() => navigate()}>Search</button>
+            </div>
+
+            <p className="quick-start-label">Quick Start</p>
+            <div className="quick-links">
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('github.com');
+              }}>
+                GitHub
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('youtube.com');
+              }}>
+                YouTube
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('reddit.com');
+              }}>
+                Reddit
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('twitter.com');
+              }}>
+                Twitter
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('netflix.com');
+              }}>
+                Netflix
+              </a>
+              <a href="#" onClick={(e) => { 
+                e.preventDefault(); 
+                navigate('amazon.com');
+              }}>
+                Amazon
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default App
