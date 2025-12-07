@@ -93,14 +93,6 @@ Right-click on tabs for quick actions:
 npm install
 ```
 
-## Development
-
-Start the development server with hot reload:
-
-```bash
-npm run electron:dev
-```
-
 ## Building
 
 Build for production:
